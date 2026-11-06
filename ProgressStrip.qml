@@ -4,8 +4,10 @@ import qs.Commons as Commons
 import qs.Ui
 
 // Overall progress as a thin vertical bar on the panel's left edge, filled
-// bottom-up, with a tick at the percent expected for today. The bar turns to
-// the theme's warning color when progress is behind that tick.
+// bottom-up, with a tick at the percent expected for today. When progress is
+// behind that tick the fill takes the theme's warning color and the gap up to
+// the tick is hatched, so the deficit reads by shape too: some themes map
+// their "red" to the accent hue, and color alone would not tell them apart.
 Item {
   id: root
 
@@ -52,6 +54,31 @@ Item {
       height: parent.height * Math.max(0, Math.min(100, root.percent)) / 100
       color: root.fillColor
       Behavior on height { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
+    }
+
+    // Deficit: hatched span between the fill and the pace tick.
+    Item {
+      id: deficit
+      readonly property real expected: root.hasExpected ? Math.max(0, Math.min(100, root.pace.expected)) : 0
+      readonly property real current: Math.max(0, Math.min(100, root.percent))
+      visible: root.pace !== null && root.pace.behind && root.hasExpected
+      clip: true
+      anchors.left: parent.left
+      anchors.right: parent.right
+      y: parent.height * (1 - expected / 100)
+      height: Math.max(0, parent.height * (expected - current) / 100)
+
+      Repeater {
+        model: Math.ceil(deficit.height / 4)
+
+        Rectangle {
+          required property int index
+          y: index * 4
+          width: deficit.width
+          height: 2
+          color: Util.alpha(Commons.Color.urgent, 0.7)
+        }
+      }
     }
 
     // Pace tick, slightly wider than the bar so it reads over either fill.

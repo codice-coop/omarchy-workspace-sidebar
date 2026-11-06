@@ -43,7 +43,8 @@ Item {
     var offsets = {}
     for (var i = 0; i < blockRepeater.count; i++) {
       var item = blockRepeater.itemAt(i)
-      if (item && item.blockId) offsets[item.blockId] = blockColumn.y + item.y
+      // Leave a little air above a block scrolled to, instead of flush with the edge.
+      if (item && item.blockId) offsets[item.blockId] = blockColumn.y + item.y - Style.spacing.lg
     }
     flick.contentY = SidebarModel.resolveScroll(config.scroll, offsets, flick.contentHeight, flick.height)
     scrollPending = false
