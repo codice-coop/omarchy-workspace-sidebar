@@ -44,12 +44,18 @@ Claude Code ──(skill progreso)──► wsbar ──escribe atómico──�
 
 ### Repo e instalación
 
-- Repo: `~/Work/omarchy/sidebar` (este). Raíz = raíz del plugin (`manifest.json` en la raíz).
-- Desarrollo: symlink `~/.config/omarchy/plugins/matis.sidebar → ~/Work/omarchy/sidebar`. Si el registro
-  de plugins no sigue symlinks, se instala con `omarchy plugin add <ruta-del-repo>` y se itera ahí
-  (a verificar al inicio del plan).
-- `wsbar` vive en `bin/wsbar` del mismo repo y se enlaza en `~/.local/bin/wsbar`.
-- La skill vive en `skills/progreso/` del repo y se enlaza en `~/.claude/skills/progreso`.
+Se sigue al pie de la letra la guía de plugins de Omarchy (`$OMARCHY_PATH/shell/README.md`, "Installing
+by hand" y "Installing a third-party plugin"):
+
+- El repo **es** el directorio del plugin: `~/.config/omarchy/plugins/matis.sidebar/`, con `manifest.json`
+  en la raíz. Es la misma forma que deja `omarchy plugin add` (un checkout git), así que exportarlo es
+  publicar este repo y que otros lo instalen con `omarchy plugin add <url>`. Sin symlinks.
+- Ciclo de desarrollo: guardar (recarga automática; `omarchy-shell shell rescanPlugins` si no aplica;
+  `omarchy restart shell` para cambios en el plugin por ser `keepLoaded`), `omarchy plugin validate
+  ~/.config/omarchy/plugins/matis.sidebar`, y `omarchy plugin enable matis.sidebar` la primera vez.
+- `wsbar` (`bin/wsbar`) y la skill (`skills/progreso/`) viajan en el mismo repo, porque son parte de la
+  funcionalidad exportable. No son código del plugin, así que se exponen fuera de él: `~/.local/bin/wsbar`
+  y `~/.claude/skills/progreso` apuntan al repo.
 
 ## 1. Plugin `matis.sidebar`
 
