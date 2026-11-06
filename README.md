@@ -33,6 +33,8 @@ workspace's agent session can keep its own progress panel up to date and leave y
 | Omarchy 4 (Quattro) | the sidebar | Quickshell-based `omarchy-shell` |
 | Python 3 (stdlib only) | `wsbar`, the CLI that writes panel content | preinstalled on Omarchy |
 | `jq` | Claude Code hooks | preinstalled on Omarchy |
+| `git` | per-project plans (`wsbar plan`) | preinstalled on Omarchy |
+| `gh` (optional) | the skill reads open PRs | skipped if not installed |
 | [Claude Code](https://claude.com/claude-code) | optional integration | not needed for the sidebar itself |
 
 No network access, no root, no services, no remote builds.
@@ -55,9 +57,10 @@ Optional steps — nothing below is done for you; each one edits your own config
 o.bind("SUPER + ALT + B", "Workspace sidebar", "omarchy-shell shell call io.github.codice-coop.workspace-sidebar toggle ''")
 ```
 
-**CLI** — put `wsbar` on your `PATH`:
+**CLI** — put `wsbar` on your `PATH` (required for the Claude Code skill):
 
 ```bash
+mkdir -p ~/.local/bin
 ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/bin/wsbar ~/.local/bin/wsbar
 ```
 
@@ -106,11 +109,13 @@ The full file format is in the
 
 ## Claude Code integration
 
-Optional. It lets one Claude Code session per workspace keep that workspace's panel current.
+Optional. It lets one Claude Code session per workspace keep that workspace's panel current. It needs
+the `wsbar` link from [Install](#install) on your `PATH`.
 
 **1. Install the skill** (the `progreso` skill, instructions in Spanish):
 
 ```bash
+mkdir -p ~/.claude/skills
 ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/skills/progreso ~/.claude/skills/progreso
 ```
 
@@ -174,10 +179,13 @@ the plugin is written defensively:
 - **Untrusted content.** Panel text can originate, indirectly, from repositories an agent reads. `wsbar`
   validates every write and caps sizes, nesting and lengths; the sidebar caps them again, never loads
   images, never interprets HTML, and only opens `https://` links, showing the real target on hover.
-- **Minimal IPC.** The plugin exposes only `toggle`, `show`, `hide` and `moveTo`.
-- **No shell interpolation.** Commands are run with argument lists; the only workspace dispatch accepts an
-  integer 1–10.
-- **Agent control.** Claude Code sessions can write only to the workspace you connected them to.
+- **Minimal IPC.** The plugin's own IPC methods are only `toggle`, `show`, `hide` and `moveTo`; its
+  internals live in a child object the shell's IPC cannot reach.
+- **No interpolation of content.** Processes run with argument lists; the one Hyprland dispatch string
+  accepts only an integer workspace 1–10.
+- **Agent control, not a sandbox.** Through `wsbar`, a Claude Code session can write only to the workspace
+  you connected it to. This prevents mistakes and cross-talk between sessions; it does not confine an
+  agent that has shell access, which could still edit the files directly.
 - **Updates.** `wsbar`, the skill and the hook are symlinks into the plugin checkout, so
   `omarchy plugin update` updates them too. Install only from a source you trust.
 
