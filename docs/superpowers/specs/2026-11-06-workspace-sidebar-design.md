@@ -202,6 +202,7 @@ wsbar milestones set '<json>' | wsbar milestone status <label> done|current|pend
 wsbar notice add --level warn "texto"         # genera id estable; imprime el id
 wsbar notice rm <id>
 wsbar text <block-id> "markdown"
+wsbar meter <block-id> --label .. --percent N  # bloque `progress` (barra secundaria)
 wsbar block rm <id> | wsbar block move <id> --to N
 wsbar scroll top|bottom|<block-id>|0.4
 wsbar validate [archivo]

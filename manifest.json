@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "matis.sidebar",
+  "name": "Workspace sidebar",
+  "version": "0.1.0",
+  "author": "Matís",
+  "description": "Left sidebar with the workspace list and the progress of each workspace's project.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Sidebar.qml"
+  }
+}

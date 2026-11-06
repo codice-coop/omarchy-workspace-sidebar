@@ -1,0 +1,996 @@
+#!/usr/bin/env python3
+"""wsbar: writes the content shown by the matis.sidebar panel.
+
+Every write validates the whole document, writes a temp file in the same
+directory and renames it over the target, so the sidebar never reads a
+half-written or invalid file.
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+VERSION = 1
+BLOCK_TYPES = ("notices", "focus", "milestones", "text", "progress")
+NOTICE_LEVELS = ("info", "warn", "error")
+MILESTONE_STATUSES = ("done", "current", "pending")
+ITEM_STATUSES = ("done", "pending")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+HISTORY_LIMIT = 50
+
+FOCUS_ID = "foco"
+MILESTONES_ID = "hitos"
+NOTICES_ID = "avisos"
+
+EXIT_ENV = 1      # environment: workspace not detectable, no git repo, hyprctl failure
+EXIT_INVALID = 2  # invalid input or document; nothing was written
+
+HELP_EPILOG = """\
+workspace target (first match wins):
+  --ws N, WSBAR_WS=N, or autodetection: the ancestors of this process are
+  matched against `hyprctl clients -j` to find the terminal's workspace.
+  Only workspaces 1..10 are valid.
+
+environment:
+  WSBAR_CONFIG_DIR  workspace files      (default ~/.config/workspaces/sidebar)
+  WSBAR_DATA_DIR    per-project plans    (default ~/.local/share/wsbar)
+  WSBAR_WS          workspace number     (overridden by --ws)
+  WSBAR_HYPRCTL     hyprctl executable   (default hyprctl)
+
+exit codes: 0 ok, 1 environment error, 2 invalid input (nothing written).
+"""
+
+
+class WsbarError(Exception):
+  def __init__(self, message, code=EXIT_INVALID):
+    super().__init__(message)
+    self.code = code
+
+
+# ---------- paths ----------
+
+def config_dir():
+  return os.path.expanduser(os.environ.get("WSBAR_CONFIG_DIR") or "~/.config/workspaces/sidebar")
+
+
+def data_dir():
+  return os.path.expanduser(os.environ.get("WSBAR_DATA_DIR") or "~/.local/share/wsbar")
+
+
+def workspace_path(ws):
+  return os.path.join(config_dir(), "workspace%d.json" % ws)
+
+
+# ---------- workspace detection ----------
+
+def parse_ws(value, source):
+  try:
+    ws = int(str(value).strip())
+  except ValueError:
+    raise WsbarError("%s: '%s' is not a workspace number (1..10)" % (source, value))
+  if not 1 <= ws <= 10:
+    raise WsbarError("%s: workspace %d is out of range (1..10)" % (source, ws))
+  return ws
+
+
+def parent_pid(pid):
+  try:
+    with open("/proc/%d/stat" % pid) as f:
+      stat = f.read()
+  except OSError:
+    return None
+  # The command name can contain spaces and parentheses; fields resume after the last ')'.
+  fields = stat[stat.rfind(")") + 2:].split()
+  try:
+    return int(fields[1])
+  except (IndexError, ValueError):
+    return None
+
+
+def ancestor_pids():
+  pids = []
+  pid = os.getpid()
+  while pid and pid > 1 and pid not in pids:
+    pids.append(pid)
+    pid = parent_pid(pid)
+  return pids
+
+
+def hyprctl_clients():
+  cmd = os.environ.get("WSBAR_HYPRCTL") or "hyprctl"
+  try:
+    out = subprocess.run([cmd, "clients", "-j"], capture_output=True, text=True, timeout=5)
+  except (OSError, subprocess.TimeoutExpired) as e:
+    raise WsbarError("cannot run %s: %s; pass --ws N" % (cmd, e), EXIT_ENV)
+  if out.returncode != 0:
+    raise WsbarError("%s clients -j failed: %s; pass --ws N" % (cmd, out.stderr.strip()), EXIT_ENV)
+  try:
+    clients = json.loads(out.stdout)
+  except json.JSONDecodeError:
+    raise WsbarError("%s clients -j returned invalid JSON; pass --ws N" % cmd, EXIT_ENV)
+  if not isinstance(clients, list):
+    raise WsbarError("%s clients -j returned unexpected data; pass --ws N" % cmd, EXIT_ENV)
+  return clients
+
+
+def detect_ws():
+  by_pid = {}
+  for c in hyprctl_clients():
+    if isinstance(c, dict) and isinstance(c.get("pid"), int):
+      ws = c.get("workspace")
+      if isinstance(ws, dict) and isinstance(ws.get("id"), int):
+        by_pid.setdefault(c["pid"], set()).add(ws["id"])
+  for pid in ancestor_pids():
+    if pid in by_pid:
+      found = by_pid[pid]
+      # Single-instance terminals (ghostty, foot --server, kitty --single-instance)
+      # own every window with one pid, so the window can't be told apart.
+      if len(found) > 1:
+        raise WsbarError("process %d has windows on workspaces %s, cannot tell which one is this terminal; pass --ws N"
+                         % (pid, ", ".join(str(w) for w in sorted(found))), EXIT_ENV)
+      ws = next(iter(found))
+      if not 1 <= ws <= 10:
+        raise WsbarError("the terminal is on workspace %d, which the sidebar does not show (1..10); pass --ws N" % ws, EXIT_ENV)
+      return ws
+  raise WsbarError("could not detect the workspace (no ancestor process is a Hyprland window); pass --ws N", EXIT_ENV)
+
+
+def resolve_ws(args):
+  if getattr(args, "ws", None) is not None:
+    return parse_ws(args.ws, "--ws")
+  env = os.environ.get("WSBAR_WS")
+  if env:
+    return parse_ws(env, "WSBAR_WS")
+  return detect_ws()
+
+
+# ---------- validation ----------
+
+def is_number(v):
+  if isinstance(v, bool) or not isinstance(v, (int, float)):
+    return False
+  return not isinstance(v, float) or math.isfinite(v)
+
+
+def check_date(v, where, errors):
+  if not isinstance(v, str) or not DATE_RE.match(v):
+    errors.append("%s must be a YYYY-MM-DD date" % where)
+    return
+  try:
+    datetime.date.fromisoformat(v)
+  except ValueError:
+    errors.append("%s is not a real date: %s" % (where, v))
+
+
+def check_percent(v, where, errors):
+  if not is_number(v) or not 0 <= v <= 100:
+    errors.append("%s must be a number 0..100" % where)
+
+
+def check_string(v, where, errors, allow_empty=False):
+  if not isinstance(v, str) or (not allow_empty and not v.strip()):
+    errors.append("%s must be a non-empty string" % where)
+
+
+def validate_block(b, where, errors):
+  if not isinstance(b, dict):
+    errors.append("%s must be an object" % where)
+    return
+  check_string(b.get("id"), where + ".id", errors)
+  t = b.get("type")
+  check_string(t, where + ".type", errors)
+  # Unknown types are ignored by the sidebar (forward compatibility).
+  if t == "notices":
+    items = b.get("items")
+    if not isinstance(items, list):
+      errors.append("%s.items must be a list" % where)
+      return
+    ids = set()
+    for i, n in enumerate(items):
+      w = "%s.items[%d]" % (where, i)
+      if not isinstance(n, dict):
+        errors.append("%s must be an object" % w)
+        continue
+      nid = n.get("id")
+      check_string(nid, w + ".id", errors)
+      if isinstance(nid, str):
+        if nid in ids:
+          errors.append("%s.id '%s' is duplicated" % (w, nid))
+        ids.add(nid)
+      if n.get("level") not in NOTICE_LEVELS:
+        errors.append("%s.level must be one of %s" % (w, ", ".join(NOTICE_LEVELS)))
+      check_string(n.get("text"), w + ".text", errors)
+      if "at" in n and not isinstance(n["at"], str):
+        errors.append("%s.at must be a string" % w)
+  elif t == "focus":
+    if "now" in b:
+      check_string(b["now"], where + ".now", errors, allow_empty=True)
+    if "next" in b:
+      nxt = b["next"]
+      if not isinstance(nxt, list) or not all(isinstance(x, str) for x in nxt):
+        errors.append("%s.next must be a list of strings" % where)
+  elif t == "milestones":
+    items = b.get("items")
+    if not isinstance(items, list):
+      errors.append("%s.items must be a list" % where)
+      return
+    for i, m in enumerate(items):
+      w = "%s.items[%d]" % (where, i)
+      if not isinstance(m, dict):
+        errors.append("%s must be an object" % w)
+        continue
+      check_string(m.get("label"), w + ".label", errors)
+      if m.get("status") not in MILESTONE_STATUSES:
+        errors.append("%s.status must be one of %s" % (w, ", ".join(MILESTONE_STATUSES)))
+      if "date" in m:
+        check_date(m["date"], w + ".date", errors)
+  elif t == "text":
+    check_string(b.get("text"), where + ".text", errors, allow_empty=True)
+  elif t == "progress":
+    if "label" in b:
+      check_string(b["label"], where + ".label", errors, allow_empty=True)
+    check_percent(b.get("percent"), where + ".percent", errors)
+
+
+def validate_doc(doc):
+  errors = []
+  if not isinstance(doc, dict):
+    return ["document must be a JSON object"]
+  # type() rather than ==: Python takes true as 1, the sidebar does not.
+  if type(doc.get("version")) is not int or doc["version"] != VERSION:
+    errors.append("version must be %d" % VERSION)
+  if "project" in doc and not isinstance(doc["project"], str):
+    errors.append("project must be a string")
+  if "progress" in doc:
+    p = doc["progress"]
+    if not isinstance(p, dict):
+      errors.append("progress must be an object")
+    else:
+      if "label" in p:
+        check_string(p["label"], "progress.label", errors, allow_empty=True)
+      check_percent(p.get("percent"), "progress.percent", errors)
+      for k in ("start", "deadline"):
+        if k in p:
+          check_date(p[k], "progress." + k, errors)
+      if not errors and "start" in p and "deadline" in p and p["start"] > p["deadline"]:
+        errors.append("progress.start is after progress.deadline")
+  if "scroll" in doc:
+    s = doc["scroll"]
+    if is_number(s):
+      if not 0 <= s <= 1:
+        errors.append("scroll as a number must be a fraction 0..1")
+    elif not isinstance(s, str) or not s:
+      errors.append("scroll must be 'top', 'bottom', a block id or a number 0..1")
+  blocks = doc.get("blocks", [])
+  if not isinstance(blocks, list):
+    errors.append("blocks must be a list")
+    return errors
+  ids = set()
+  for i, b in enumerate(blocks):
+    validate_block(b, "blocks[%d]" % i, errors)
+    if isinstance(b, dict) and isinstance(b.get("id"), str):
+      if b["id"] in ids:
+        errors.append("blocks[%d].id '%s' is duplicated" % (i, b["id"]))
+      ids.add(b["id"])
+  return errors
+
+
+def validate_plan(plan):
+  errors = []
+  if not isinstance(plan, dict):
+    return ["plan must be a JSON object"]
+  check_string(plan.get("label"), "label", errors)
+  if "root" in plan and not isinstance(plan["root"], str):
+    errors.append("root must be a string")
+  date_errors = []
+  for k in ("start", "deadline"):
+    if k in plan:
+      check_date(plan[k], k, date_errors)
+  if not date_errors and "start" in plan and "deadline" in plan and plan["start"] > plan["deadline"]:
+    date_errors.append("start is after deadline")
+  errors.extend(date_errors)
+  items = plan.get("items")
+  if not isinstance(items, list):
+    errors.append("items must be a list")
+    items = []
+  ids = set()
+  for i, it in enumerate(items):
+    w = "items[%d]" % i
+    if not isinstance(it, dict):
+      errors.append("%s must be an object" % w)
+      continue
+    iid = it.get("id")
+    check_string(iid, w + ".id", errors)
+    if isinstance(iid, str):
+      if iid in ids:
+        errors.append("%s.id '%s' is duplicated" % (w, iid))
+      ids.add(iid)
+    check_string(it.get("label"), w + ".label", errors)
+    if "weight" in it and (not is_number(it["weight"]) or it["weight"] <= 0):
+      errors.append("%s.weight must be a positive number" % w)
+    if "status" in it and it["status"] not in ITEM_STATUSES:
+      errors.append("%s.status must be one of %s" % (w, ", ".join(ITEM_STATUSES)))
+    if "milestone" in it:
+      check_string(it["milestone"], w + ".milestone", errors)
+  if "history" in plan and not isinstance(plan["history"], list):
+    errors.append("history must be a list")
+  return errors
+
+
+# ---------- io ----------
+
+def reject_constant(name):
+  raise ValueError("%s is not valid JSON" % name)
+
+
+def finite_float(text):
+  value = float(text)
+  if not math.isfinite(value):
+    raise ValueError("%s is out of range" % text)
+  return value
+
+
+# Python's json takes NaN, Infinity and 1e999; JSON.parse in the sidebar does not.
+STRICT_JSON = {"parse_constant": reject_constant, "parse_float": finite_float}
+
+
+def read_json(path):
+  try:
+    with open(path, encoding="utf-8") as f:
+      return json.load(f, **STRICT_JSON)
+  except FileNotFoundError:
+    return None
+  except ValueError as e:
+    raise WsbarError("%s is not valid JSON (%s); fix or remove it" % (path, e))
+
+
+def atomic_write(path, data):
+  directory = os.path.dirname(path)
+  os.makedirs(directory, exist_ok=True)
+  try:
+    text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+  except ValueError as e:
+    raise WsbarError("%s: refusing to write a non-finite number (%s)" % (path, e))
+  fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+      f.write(text)
+      f.flush()
+      os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+  except BaseException:
+    try:
+      os.unlink(tmp)
+    except OSError:
+      pass
+    raise
+
+
+def fail_invalid(what, errors):
+  raise WsbarError("%s is invalid, nothing written:\n  %s" % (what, "\n  ".join(errors)))
+
+
+def load_doc(ws):
+  path = workspace_path(ws)
+  doc = read_json(path)
+  if doc is None:
+    return {"version": VERSION, "blocks": []}
+  errors = validate_doc(doc)
+  if errors:
+    fail_invalid("existing %s" % path, errors)
+  doc.setdefault("blocks", [])
+  return doc
+
+
+def save_doc(ws, doc):
+  errors = validate_doc(doc)
+  if errors:
+    fail_invalid("result", errors)
+  atomic_write(workspace_path(ws), doc)
+
+
+def parse_json_arg(text, what):
+  try:
+    return json.loads(text, **STRICT_JSON)
+  except ValueError as e:
+    raise WsbarError("%s is not valid JSON: %s" % (what, e))
+
+
+def now_minutes():
+  return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M")
+
+
+# ---------- block helpers ----------
+
+def find_block(doc, block_id):
+  for i, b in enumerate(doc["blocks"]):
+    if b.get("id") == block_id:
+      return i, b
+  return -1, None
+
+
+def index_after(doc, types):
+  """Position right after the last block whose type is in `types` (0 if none)."""
+  pos = 0
+  for i, b in enumerate(doc["blocks"]):
+    if b.get("type") in types:
+      pos = i + 1
+  return pos
+
+
+def upsert_block(doc, block, insert_at):
+  i, old = find_block(doc, block["id"])
+  if old is None:
+    doc["blocks"].insert(insert_at, block)
+    return
+  if old.get("type") != block["type"]:
+    raise WsbarError("block '%s' exists with type '%s', expected '%s'" % (block["id"], old.get("type"), block["type"]))
+  merged = dict(old)
+  merged.update(block)
+  doc["blocks"][i] = merged
+
+
+def b36(n):
+  digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+  s = ""
+  while True:
+    n, r = divmod(n, 36)
+    s = digits[r] + s
+    if n == 0:
+      return s
+
+
+def new_notice_id(doc):
+  used = set()
+  for b in doc["blocks"]:
+    if b.get("type") == "notices":
+      used.update(n.get("id") for n in b.get("items", []))
+  base = "n" + b36(int(time.time() * 1000))
+  nid, counter = base, 0
+  while nid in used:
+    counter += 1
+    nid = base + b36(counter)
+  return nid
+
+
+# ---------- workspace commands ----------
+
+def cmd_where(args):
+  print(resolve_ws(args))
+
+
+def cmd_show(args):
+  ws = resolve_ws(args)
+  path = workspace_path(ws)
+  doc = read_json(path)
+  if doc is None:
+    raise WsbarError("workspace %d has no file yet (%s)" % (ws, path), EXIT_ENV)
+  print(json.dumps(doc, indent=2, ensure_ascii=False))
+
+
+def cmd_progress(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  if args.clear:
+    doc.pop("progress", None)
+  else:
+    p = dict(doc.get("progress") or {})
+    if args.label is not None:
+      p["label"] = args.label
+    if args.percent is not None:
+      p["percent"] = args.percent
+    for k in ("start", "deadline"):
+      v = getattr(args, k)
+      if v == "":
+        p.pop(k, None)
+      elif v is not None:
+        p[k] = v
+    if "percent" not in p:
+      raise WsbarError("progress needs --percent (no previous value to keep)")
+    doc["progress"] = p
+  save_doc(ws, doc)
+
+
+def cmd_focus(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  block = {"id": FOCUS_ID, "type": "focus"}
+  if args.now is not None:
+    block["now"] = args.now
+  if args.next is not None or args.clear_next:
+    block["next"] = args.next or []
+  if len(block) == 2:
+    raise WsbarError("focus needs --now and/or --next")
+  upsert_block(doc, block, index_after(doc, ("notices",)))
+  save_doc(ws, doc)
+
+
+def milestones_insert_at(doc):
+  return index_after(doc, ("notices", "focus"))
+
+
+def cmd_milestones_set(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  data = parse_json_arg(args.json, "milestones")
+  if isinstance(data, dict):
+    data = data.get("items")
+  if not isinstance(data, list):
+    raise WsbarError("milestones must be a JSON list of {label, status, date?} (or {\"items\": [...]})")
+  i, old = find_block(doc, MILESTONES_ID)
+  block = {"id": MILESTONES_ID, "type": "milestones", "items": data}
+  if old is None:
+    doc["blocks"].insert(milestones_insert_at(doc), block)
+  elif old.get("type") != "milestones":
+    raise WsbarError("block '%s' exists with type '%s'" % (MILESTONES_ID, old.get("type")))
+  else:
+    old["items"] = data
+  save_doc(ws, doc)
+
+
+def cmd_milestone_status(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  hits = [m for b in doc["blocks"] if b.get("type") == "milestones"
+          for m in b.get("items", []) if m.get("label") == args.label]
+  if not hits:
+    raise WsbarError("no milestone labelled '%s'" % args.label)
+  for m in hits:
+    m["status"] = args.status
+  save_doc(ws, doc)
+
+
+def cmd_notice_add(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  _, block = find_block(doc, NOTICES_ID)
+  if block is None:
+    block = next((b for b in doc["blocks"] if b.get("type") == "notices"), None)
+  if block is None:
+    block = {"id": NOTICES_ID, "type": "notices", "items": []}
+    doc["blocks"].insert(0, block)
+  elif block.get("type") != "notices":
+    raise WsbarError("block '%s' exists with type '%s'" % (NOTICES_ID, block.get("type")))
+  nid = new_notice_id(doc)
+  block.setdefault("items", []).append({"id": nid, "level": args.level, "text": args.text, "at": now_minutes()})
+  save_doc(ws, doc)
+  print(nid)
+
+
+def cmd_notice_rm(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  found = False
+  for b in doc["blocks"]:
+    if b.get("type") == "notices":
+      items = b.get("items", [])
+      kept = [n for n in items if n.get("id") != args.id]
+      if len(kept) != len(items):
+        b["items"] = kept
+        found = True
+  if not found:
+    raise WsbarError("no notice with id '%s'" % args.id)
+  save_doc(ws, doc)
+
+
+def cmd_text(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  upsert_block(doc, {"id": args.block_id, "type": "text", "text": args.markdown}, len(doc["blocks"]))
+  save_doc(ws, doc)
+
+
+def cmd_meter(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  _, old = find_block(doc, args.block_id)
+  block = {"id": args.block_id, "type": "progress"}
+  if args.label is not None:
+    block["label"] = args.label
+  if args.percent is not None:
+    block["percent"] = args.percent
+  elif old is None:
+    raise WsbarError("--percent is required to create the meter '%s'" % args.block_id)
+  upsert_block(doc, block, len(doc["blocks"]))
+  save_doc(ws, doc)
+
+
+def cmd_block_rm(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  i, _ = find_block(doc, args.id)
+  if i < 0:
+    raise WsbarError("no block with id '%s'" % args.id)
+  del doc["blocks"][i]
+  save_doc(ws, doc)
+
+
+def cmd_block_move(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  i, block = find_block(doc, args.id)
+  if i < 0:
+    raise WsbarError("no block with id '%s'" % args.id)
+  n = len(doc["blocks"])
+  if not 0 <= args.to < n:
+    raise WsbarError("--to must be a position 0..%d (0 = top)" % (n - 1))
+  del doc["blocks"][i]
+  doc["blocks"].insert(args.to, block)
+  save_doc(ws, doc)
+
+
+def cmd_scroll(args):
+  ws = resolve_ws(args)
+  doc = load_doc(ws)
+  target = args.target
+  # A block id wins over a number: `wsbar text 1 ..` then `wsbar scroll 1` means the block.
+  if find_block(doc, target)[1] is not None or target in ("top", "bottom"):
+    doc["scroll"] = target
+  else:
+    try:
+      value = float(target)
+    except ValueError:
+      raise WsbarError("scroll target '%s' is not top, bottom, a number 0..1 or an existing block id" % target)
+    if not 0 <= value <= 1:
+      raise WsbarError("scroll fraction must be 0..1")
+    doc["scroll"] = int(value) if value in (0, 1) else value
+  save_doc(ws, doc)
+
+
+def cmd_validate(args):
+  path = args.file or workspace_path(resolve_ws(args))
+  doc = read_json(path)
+  if doc is None:
+    raise WsbarError("%s does not exist" % path, EXIT_ENV)
+  errors = validate_doc(doc)
+  if errors:
+    raise WsbarError("%s is invalid:\n  %s" % (path, "\n  ".join(errors)))
+  print("ok %s" % path)
+
+
+# ---------- plan ----------
+
+def project_root(args):
+  explicit = getattr(args, "project", None)
+  cwd = explicit or os.getcwd()
+  if explicit and not os.path.isdir(explicit):
+    raise WsbarError("--project %s is not a directory" % explicit)
+  try:
+    out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, timeout=5)
+  except (OSError, subprocess.TimeoutExpired):
+    out = None
+  if out is not None and out.returncode == 0 and out.stdout.strip():
+    return os.path.realpath(out.stdout.strip())
+  if explicit:
+    return os.path.realpath(explicit)
+  raise WsbarError("%s is not inside a git repository; pass --project PATH" % cwd, EXIT_ENV)
+
+
+def project_slug(root):
+  # The readable part alone is ambiguous (a/b-c and a/b/c); the hash of the full
+  # path keeps different projects in different files.
+  readable = root.replace("/", "-").lstrip("-")
+  return "%s-%s" % (readable, hashlib.sha1(root.encode("utf-8")).hexdigest()[:10])
+
+
+def plan_path(root):
+  return os.path.join(data_dir(), "projects", project_slug(root) + ".json")
+
+
+def load_plan(root):
+  path = plan_path(root)
+  plan = read_json(path)
+  if plan is None:
+    raise WsbarError("no plan for %s yet; create one with `wsbar plan set`" % root)
+  errors = validate_plan(plan)
+  if errors:
+    fail_invalid("existing %s" % path, errors)
+  if plan.get("root", root) != root:
+    raise WsbarError("%s belongs to %s, not %s" % (path, plan["root"], root), EXIT_ENV)
+  return plan
+
+
+def save_plan(root, plan):
+  errors = validate_plan(plan)
+  if errors:
+    fail_invalid("plan", errors)
+  atomic_write(plan_path(root), plan)
+
+
+def plan_percent(plan):
+  total = sum(it.get("weight", 1) for it in plan["items"])
+  if total <= 0:
+    return 0
+  done = sum(it.get("weight", 1) for it in plan["items"] if it.get("status", "pending") == "done")
+  # Half up, like Math.round in the sidebar; Python's round() would turn 12.5 into 12.
+  return math.floor(done / total * 100 + 0.5)
+
+
+def plan_milestones(plan):
+  order, done = [], {}
+  for it in plan["items"]:
+    m = it.get("milestone")
+    if not m:
+      continue
+    if m not in done:
+      order.append(m)
+      done[m] = True
+    done[m] = done[m] and it.get("status", "pending") == "done"
+  result, current_taken = [], False
+  for m in order:
+    if done[m]:
+      status = "done"
+    elif not current_taken:
+      status, current_taken = "current", True
+    else:
+      status = "pending"
+    result.append({"label": m, "status": status})
+  return result
+
+
+def add_history(plan, item, event):
+  history = plan.setdefault("history", [])
+  history.append({"at": now_minutes(), "item": item, "event": event})
+  del history[:-HISTORY_LIMIT]
+
+
+def cmd_plan_set(args):
+  root = project_root(args)
+  plan = parse_json_arg(args.json, "plan")
+  errors = validate_plan(plan)
+  if errors:
+    fail_invalid("plan", errors)
+  plan["root"] = root
+  try:
+    old = read_json(plan_path(root))
+  except WsbarError:
+    old = None
+  old = old if isinstance(old, dict) and not validate_plan(old) and old.get("root", root) == root else None
+  # Re-planning keeps what is already done unless the new plan says otherwise.
+  old_status = {it["id"]: it.get("status", "pending") for it in old["items"]} if old else {}
+  for it in plan["items"]:
+    it.setdefault("weight", 1)
+    it.setdefault("status", old_status.get(it["id"], "pending"))
+  if "history" not in plan:
+    plan["history"] = list(old.get("history", [])) if old else []
+  add_history(plan, None, "set")
+  save_plan(root, plan)
+  print(plan_path(root))
+
+
+def published_doc(root, plan, ws):
+  """The workspace document with the plan rendered in; validated, not yet written."""
+  doc = load_doc(ws)
+  # The workspace moving to another project: the old focus and milestone dates
+  # belong to that project, not this one. A file without a project claims none.
+  same_project = doc.get("project", root) == root
+  if not same_project:
+    i, old_focus = find_block(doc, FOCUS_ID)
+    if old_focus is not None and old_focus.get("type") == "focus":
+      del doc["blocks"][i]
+  doc["project"] = root
+  progress = {"label": plan["label"], "percent": plan_percent(plan)}
+  for k in ("start", "deadline"):
+    if k in plan:
+      progress[k] = plan[k]
+  doc["progress"] = progress
+  milestones = plan_milestones(plan)
+  i, old = find_block(doc, MILESTONES_ID)
+  if old is not None and old.get("type") != "milestones":
+    raise WsbarError("block '%s' exists with type '%s'" % (MILESTONES_ID, old.get("type")))
+  if not milestones:
+    if old is not None:
+      del doc["blocks"][i]
+  elif old is not None:
+    if same_project:
+      # Dates are set by hand with `milestones set`; keep them across publishes.
+      dates = {m.get("label"): m["date"] for m in old.get("items", []) if isinstance(m, dict) and "date" in m}
+      for m in milestones:
+        if m["label"] in dates:
+          m["date"] = dates[m["label"]]
+    old["items"] = milestones
+  else:
+    doc["blocks"].insert(milestones_insert_at(doc), {"id": MILESTONES_ID, "type": "milestones", "items": milestones})
+  errors = validate_doc(doc)
+  if errors:
+    fail_invalid("result", errors)
+  return doc
+
+
+def publish(root, plan, ws):
+  save_doc(ws, published_doc(root, plan, ws))
+  return plan_percent(plan)
+
+
+def cmd_plan_done(args):
+  root = project_root(args)
+  ws = None if args.no_publish else resolve_ws(args)
+  plan = load_plan(root)
+  item = next((it for it in plan["items"] if it["id"] == args.item_id), None)
+  if item is None:
+    raise WsbarError("no plan item with id '%s' (have: %s)" % (args.item_id, ", ".join(it["id"] for it in plan["items"])))
+  if item.get("status") != "done":
+    item["status"] = "done"
+    add_history(plan, args.item_id, "done")
+  # Build the workspace first: if it can't be written, the plan stays untouched.
+  doc = published_doc(root, plan, ws) if ws is not None else None
+  save_plan(root, plan)
+  if doc is not None:
+    save_doc(ws, doc)
+  print("%d%%" % plan_percent(plan))
+
+
+def cmd_plan_show(args):
+  root = project_root(args)
+  plan = load_plan(root)
+  out = dict(plan)
+  out["project"] = root
+  out["percent"] = plan_percent(plan)
+  print(json.dumps(out, indent=2, ensure_ascii=False))
+
+
+def cmd_publish(args):
+  root = project_root(args)
+  ws = resolve_ws(args)
+  plan = load_plan(root)
+  percent = publish(root, plan, ws)
+  print("workspace %d: %d%%" % (ws, percent))
+
+
+# ---------- argument parsing ----------
+
+def percent_arg(v):
+  try:
+    n = float(v)
+  except ValueError:
+    raise argparse.ArgumentTypeError("'%s' is not a number" % v)
+  if not 0 <= n <= 100:
+    raise argparse.ArgumentTypeError("percent must be 0..100")
+  return int(n) if n == int(n) else n
+
+
+def date_arg(v):
+  if v == "":
+    return v
+  errors = []
+  check_date(v, "date", errors)
+  if errors:
+    raise argparse.ArgumentTypeError("'%s' is not a YYYY-MM-DD date" % v)
+  return v
+
+
+class Parser(argparse.ArgumentParser):
+  def error(self, message):
+    self.print_usage(sys.stderr)
+    sys.stderr.write("wsbar: %s\n" % message)
+    sys.exit(EXIT_INVALID)
+
+
+def build_parser():
+  # Shared options are accepted before or after the subcommand.
+  common = argparse.ArgumentParser(add_help=False)
+  common.add_argument("--ws", default=argparse.SUPPRESS, help="target workspace 1..10 (overrides WSBAR_WS and autodetection)")
+  proj = argparse.ArgumentParser(add_help=False)
+  proj.add_argument("--project", default=argparse.SUPPRESS, metavar="PATH", help="project directory (default: git toplevel of cwd)")
+
+  p = Parser(prog="wsbar", description="Write the matis.sidebar progress panel of a Hyprland workspace.",
+             epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+  p.add_argument("--ws", help="target workspace 1..10 (overrides WSBAR_WS and autodetection)")
+  sub = p.add_subparsers(dest="cmd", metavar="command", parser_class=Parser)
+  sub.required = True
+
+  def add(name, func, help, parents=(common,)):
+    sp = sub.add_parser(name, help=help, description=help, parents=list(parents))
+    if func:
+      sp.set_defaults(func=func)
+    return sp
+
+  add("where", cmd_where, "print the target workspace number")
+  add("show", cmd_show, "print the workspace JSON")
+
+  sp = add("progress", cmd_progress, "set the overall progress (missing flags keep their value)")
+  sp.add_argument("--label")
+  sp.add_argument("--percent", type=percent_arg)
+  sp.add_argument("--start", type=date_arg, help="YYYY-MM-DD, '' removes it")
+  sp.add_argument("--deadline", type=date_arg, help="YYYY-MM-DD, '' removes it")
+  sp.add_argument("--clear", action="store_true", help="remove the progress section")
+
+  sp = add("focus", cmd_focus, "set the focus block ('foco')")
+  sp.add_argument("--now")
+  sp.add_argument("--next", action="append", help="repeatable; replaces the whole list")
+  sp.add_argument("--clear-next", action="store_true", help="empty the next list")
+
+  sp = add("milestones", None, "manage the milestones block ('hitos')", parents=())
+  msub = sp.add_subparsers(dest="sub", metavar="action", parser_class=Parser)
+  msub.required = True
+  ms = msub.add_parser("set", help="replace the milestones: '[{\"label\":..,\"status\":..,\"date\"?:..}]'", parents=[common])
+  ms.add_argument("json")
+  ms.set_defaults(func=cmd_milestones_set)
+
+  sp = add("milestone", None, "change one milestone", parents=())
+  msub = sp.add_subparsers(dest="sub", metavar="action", parser_class=Parser)
+  msub.required = True
+  ms = msub.add_parser("status", help="set the status of the milestone with that label", parents=[common])
+  ms.add_argument("label")
+  ms.add_argument("status", choices=MILESTONE_STATUSES)
+  ms.set_defaults(func=cmd_milestone_status)
+
+  sp = add("notice", None, "manage notices ('avisos')", parents=())
+  nsub = sp.add_subparsers(dest="sub", metavar="action", parser_class=Parser)
+  nsub.required = True
+  na = nsub.add_parser("add", help="add a notice and print its id", parents=[common])
+  na.add_argument("--level", choices=NOTICE_LEVELS, default="info")
+  na.add_argument("text")
+  na.set_defaults(func=cmd_notice_add)
+  nr = nsub.add_parser("rm", help="remove a notice by id", parents=[common])
+  nr.add_argument("id")
+  nr.set_defaults(func=cmd_notice_rm)
+
+  sp = add("text", cmd_text, "set a text block (created at the end if missing)")
+  sp.add_argument("block_id", metavar="block-id")
+  sp.add_argument("markdown")
+
+  sp = add("meter", cmd_meter, "set a secondary progress bar block (created at the end if missing)")
+  sp.add_argument("block_id", metavar="block-id")
+  sp.add_argument("--label")
+  sp.add_argument("--percent", type=percent_arg, help="0..100; required when the block is new")
+
+  sp = add("block", None, "remove or reorder blocks", parents=())
+  bsub = sp.add_subparsers(dest="sub", metavar="action", parser_class=Parser)
+  bsub.required = True
+  br = bsub.add_parser("rm", help="remove a block", parents=[common])
+  br.add_argument("id")
+  br.set_defaults(func=cmd_block_rm)
+  bm = bsub.add_parser("move", help="move a block to a position (0 = top)", parents=[common])
+  bm.add_argument("id")
+  bm.add_argument("--to", type=int, required=True, metavar="N")
+  bm.set_defaults(func=cmd_block_move)
+
+  sp = add("scroll", cmd_scroll, "set the initial scroll: top, bottom, a block id or a fraction 0..1")
+  sp.add_argument("target")
+
+  sp = add("validate", cmd_validate, "validate a workspace file (default: the target workspace)")
+  sp.add_argument("file", nargs="?")
+
+  sp = add("plan", None, "per-project plan (~/.local/share/wsbar/projects)", parents=())
+  psub = sp.add_subparsers(dest="sub", metavar="action", parser_class=Parser)
+  psub.required = True
+  ps = psub.add_parser("set", parents=[common, proj],
+                       help="set the plan: '{\"label\",\"start\"?,\"deadline\"?,\"items\":[{\"id\",\"label\",\"weight\"?,\"status\"?,\"milestone\"?}]}'")
+  ps.add_argument("json")
+  ps.set_defaults(func=cmd_plan_set)
+  pd = psub.add_parser("done", help="mark an item done and publish", parents=[common, proj])
+  pd.add_argument("item_id", metavar="item-id")
+  pd.add_argument("--no-publish", action="store_true", help="only update the plan")
+  pd.set_defaults(func=cmd_plan_done)
+  pv = psub.add_parser("show", help="print the plan with its computed percent", parents=[common, proj])
+  pv.set_defaults(func=cmd_plan_show)
+
+  add("publish", cmd_publish, "write the plan's progress and milestones to the workspace", parents=(common, proj))
+  return p
+
+
+def main(argv=None):
+  args = build_parser().parse_args(argv)
+  try:
+    args.func(args)
+  except WsbarError as e:
+    sys.stderr.write("wsbar: %s\n" % e)
+    return e.code
+  except BrokenPipeError:
+    return 0
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main())
