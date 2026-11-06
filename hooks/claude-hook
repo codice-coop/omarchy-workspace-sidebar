@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Claude Code hook for the matis.sidebar panel. In Claude settings:
+#   "command": "<repo>/hooks/claude-hook <EventName>"
+# for SessionStart, Stop, Notification, UserPromptSubmit, PostToolUse and SessionEnd.
+#
+# It runs on every tool call, so sessions that were not connected with
+# `wsbar connect` cost one jq call and a stat, and never start Python.
+# Always exits 0 and prints nothing, except the SessionStart context JSON.
+
+event="${1:-}"
+case "$event" in
+  SessionStart|Stop|Notification|UserPromptSubmit|PostToolUse|SessionEnd) ;;
+  *) exit 0 ;;
+esac
+
+state="${WSBAR_STATE_DIR:-$HOME/.local/state/wsbar}"
+input="$(cat 2>/dev/null)" || exit 0
+sid="$(jq -r 'if (.session_id | type) == "string" then .session_id else "" end' <<<"$input" 2>/dev/null)" || exit 0
+[[ "$sid" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || exit 0
+
+if [[ ! -e "$state/sessions/$sid" ]]; then
+  # An unconnected session only reaches Python on SessionStart, and only while
+  # some session is connected: after /clear the new id may inherit the link
+  # handed off by the session that just ended, and the start of any session
+  # marks links whose Claude Code process died without SessionEnd as ended.
+  [[ "$event" == SessionStart ]] || exit 0
+  compgen -G "$state/handoff/*" >/dev/null || compgen -G "$state/sessions/*" >/dev/null || exit 0
+fi
+if [[ "$event" == UserPromptSubmit || "$event" == PostToolUse ]]; then
+  [[ -e "$state/waiting/$sid" ]] || exit 0
+fi
+
+dir="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+wsbar="$dir/../bin/wsbar"
+budget=2.5
+[[ "$event" == SessionEnd ]] && budget=1.4
+run=()
+command -v timeout >/dev/null 2>&1 && run=(timeout -k 0.3 "$budget")
+
+if [[ "$event" == SessionStart ]]; then
+  printf '%s' "$input" | "${run[@]}" "$wsbar" hook "$event" 2>/dev/null
+else
+  printf '%s' "$input" | "${run[@]}" "$wsbar" hook "$event" >/dev/null 2>&1
+fi
+exit 0

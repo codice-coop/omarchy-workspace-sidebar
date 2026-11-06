@@ -18,7 +18,7 @@ Criterios de éxito:
 
 ## Alcance y descomposición
 
-Tres piezas, en este orden de construcción:
+Tres piezas, en este orden de construcción (más la conexión con sesiones, sección 5):
 
 1. **Plugin `matis.sidebar`** (QML, Quickshell dentro de `omarchy-shell`).
 2. **CLI `wsbar`**: única vía recomendada de escritura del contenido; valida y escribe atómico.
@@ -179,7 +179,10 @@ Lo escribe sólo el plugin:
 ```
 
 Cerrar un aviso agrega su id a `dismissed[N]`. Un aviso descartado no se muestra ni cuenta en el contador
-aunque siga en `workspaceN.json`. Separar este archivo garantiza que Claude y la UI nunca escriban el mismo
+aunque siga en `workspaceN.json`. Al cerrar uno, la lista de ese workspace se poda a los ids que el
+workspace todavía tiene (cada aviso de "Claude espera" trae un id nuevo y si no la lista crecería sin
+fin); además cada lista guarda como máximo los 100 ids más nuevos, y un `_sidebar.json` de más de 256 KB
+se lee como los valores por defecto. Separar este archivo garantiza que Claude y la UI nunca escriban el mismo
 archivo.
 
 ## 3. CLI `wsbar`
@@ -236,19 +239,143 @@ Una skill con tres usos, todos vía `wsbar`:
 3. **Avisar**: cuando hay algo para que la persona revise (decisión pendiente, CI roto, tarea larga
    terminada): `wsbar notice add`. Avisos cortos, una línea, accionables.
 
-No usa Notion ni fuentes fuera del repo.
+No usa Notion ni fuentes fuera del repo. Antes de todo esto, la sesión tiene que estar conectada a su
+workspace (sección 5); la skill también cubre `/progreso conectar`, `desconectar` y `estado`.
+
+## 5. Conexión con sesiones de Claude Code
+
+Agregado el 2026-11-06, aprobado en conversación.
+
+### Objetivo
+
+Que sólo escriba el panel de un workspace la sesión de Claude Code que la persona eligió para él, y que
+esa sesión mantenga el panel sin depender de que Claude se acuerde: publicar el plan al arrancar y avisar
+cuando espera una respuesta.
+
+Reglas:
+
+- Las sesiones están **desconectadas por defecto**. La persona conecta una sesión con
+  `/progreso conectar` (`wsbar connect`) y la desconecta con `/progreso desconectar` (`wsbar disconnect`);
+  `/progreso estado` es `wsbar status`. Claude nunca conecta por iniciativa propia.
+- **Una sesión por workspace**: conectar otra reemplaza a la anterior y lo informa
+  ("reemplazó la sesión <prefijo>"). Una sesión está en un solo workspace: conectarla en otro la mueve
+  ("movida desde el workspace M").
+- Los hooks sólo actúan para sesiones conectadas.
+
+### Archivos
+
+`<WSBAR_CONFIG_DIR>/_sessions.json` (default `~/.config/workspaces/sidebar/_sessions.json`). Lo escribe
+sólo `wsbar`, atómico y validado; la sidebar lo lee y nunca lo escribe:
+
+```json
+{"version": 1, "workspaces": {"5": {"session": "<session-id>", "project": "/abs/path o vacío",
+                                    "since": "2026-11-06T10:12", "active": true,
+                                    "host": "4026531836-12345-678901"}}}
+```
+
+- Claves `"1"`..`"10"`; ids de sesión `^[A-Za-z0-9_-]{1,128}$` (otro valor se rechaza).
+- `project`: toplevel git del cwd al conectar (o `--project`), vacío si no hay.
+- `active`: `false` después de `SessionEnd`; el link se conserva para que una sesión retomada con el
+  mismo id siga conectada (`SessionStart` lo vuelve a `true`).
+- `host` (opcional): el proceso de Claude Code de la sesión, `<inodo del pid namespace>-<pid>-<inicio en
+  ticks>`. Lo graba `connect` corrido desde la sesión (no desde una terminal con `--session`) y lo
+  actualizan `SessionStart`, el traspaso de `/clear` y cualquier hook de la sesión que corra en otro
+  proceso. Si la sesión muere sin `SessionEnd` (kill -9, OOM, un crash), el siguiente `wsbar` que pase
+  por los links (`status`, `connect`, `disconnect`, una escritura con restricción por sesión, un hook de
+  una sesión conectada o el `SessionStart` de cualquier sesión mientras haya alguna conectada) ve que ese
+  proceso ya no existe, marca el link `active: false` y saca su aviso de espera. Un `host` grabado en
+  otro pid namespace (un sandbox) no se juzga, y la sesión que corre el comando o el hook nunca se toma
+  por muerta.
+
+Estado en `<WSBAR_STATE_DIR>` (default `~/.local/state/wsbar`):
+
+- `sessions/<id>`: marcador de sesión conectada (contenido: el número de workspace). Lo crean `connect` y
+  lo borran `disconnect` y el reemplazo. Es el camino rápido de los hooks.
+- `waiting/<id>`: existe mientras se muestra un aviso de "Claude espera" de esa sesión (contenido: el id
+  del aviso).
+- `handoff/`: nota de traspaso para `/clear` (ver abajo), válida 60 s.
+- `wsbar.lock`: serializa las escrituras de comandos y hooks.
+- `hook.log`: errores de los hooks, rotado a 64 KB.
+
+### Restricción por sesión en `wsbar`
+
+Si `CLAUDE_CODE_SESSION_ID` está definida (`wsbar` corre dentro de Claude Code):
+
+- todo comando que escribe un `workspaceN.json` o un plan (incluidos `plan set`, `plan done` y
+  `publish`) exige que la sesión esté conectada y escribe sólo en su workspace; si no, sale con 1 y un
+  mensaje en castellano que pide conectar con "/progreso conectar". `--ws` y `WSBAR_WS` no permiten
+  apuntar a otro workspace;
+- sin `--ws`, una sesión conectada apunta a su workspace sin autodetección (funciona dentro de tmux), y
+  `wsbar where` lo imprime;
+- los comandos de lectura (`where`, `show`, `validate`, `plan show`, `status`) y `connect`/`disconnect`
+  funcionan siempre;
+- `disconnect` desconecta la sesión (la de la variable o la de `--session`); si además se da `--ws N` o
+  `WSBAR_WS` y la sesión no está conectada a N, sale con 1 sin tocar nada y dice que para desconectar
+  otro workspace se use una terminal.
+
+Sin esa variable (una terminal común) no hay restricción. `wsbar disconnect --ws N` desconecta desde la
+terminal la sesión de un workspace.
+
+`wsbar notice add --id ID` permite fijar el id del aviso (mismas reglas que los otros ids); si ya existe
+uno con ese id, lo reemplaza.
+
+### Hooks
+
+`hooks/claude-hook <Evento>` se registra en `~/.claude/settings.json` (el bloque está en el README) para
+`SessionStart`, `Stop`, `Notification`, `UserPromptSubmit`, `PostToolUse` y `SessionEnd`. Corre en cada
+llamada a herramienta, así que en bash, antes de arrancar Python, lee `session_id` del JSON de stdin con
+`jq`, lo valida y sale si no existe `sessions/<id>` (salvo en `SessionStart` mientras haya alguna sesión
+conectada o una nota de traspaso, para que Python detecte sesiones muertas y el traspaso de `/clear`); para `UserPromptSubmit` y `PostToolUse` también sale
+si no existe `waiting/<id>`. Recién entonces le pasa el evento a `wsbar hook <Evento>`.
+
+`wsbar hook` siempre sale con 0, no imprime nada salvo el JSON de `SessionStart`, tarda como máximo
+~2 s (1,1 s en `SessionEnd`, que Claude Code limita a 1,5 s), registra errores en `hook.log`, ignora
+eventos desconocidos y escribe sólo en el workspace del link, nunca por autodetección.
+
+| Evento | Qué hace |
+| --- | --- |
+| `SessionStart` | marca `active: true`; si el proyecto del link tiene plan, lo publica; imprime `hookSpecificOutput.additionalContext` (≤ 2 KB) con el workspace, el plan (label, %, pendientes con ids), el foco y las reglas de la skill; sin plan, pide ofrecer `/progreso`. Sin conexión, nada |
+| `Stop` | saca el aviso de espera anterior de la sesión y agrega uno nuevo, `info`, "Claude terminó y espera tu respuesta · <proyecto>" |
+| `Notification` | igual, `warn`, con el mensaje de Claude Code (una línea, ~120 caracteres). Sólo para los `notification_type` en que Claude espera a la persona: `permission_prompt`, `idle_prompt`, `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input`, `quota_auto_resume_stale`, `quota_auto_resume_disabled`, o sin tipo (versiones viejas). Ignora el resto (`auth_success`, `auth_storage_failure`, `elicitation_complete`, `elicitation_response`, `agent_completed`, `quota_auto_resume_fired`, `plugin_notification` y cualquier tipo nuevo) |
+| `UserPromptSubmit`, `PostToolUse` | si hay aviso de espera, lo saca |
+| `SessionEnd` | saca el aviso de espera y marca `active: false` sin borrar el link |
+
+El id de cada aviso de espera es nuevo (`claude-espera-<tiempo en base36>`), porque la sidebar recuerda
+los ids descartados y no volvería a mostrar uno repetido.
+
+`/clear` termina la sesión y abre otra con id nuevo en el mismo proceso de Claude Code. Para no
+desconectarla en silencio, `SessionEnd` con `reason: "clear"` deja una nota de traspaso atada a ese
+proceso y el `SessionStart` con `source: "clear"` del mismo proceso hereda el link.
+
+### Sidebar
+
+`SidebarController.qml` observa `_sessions.json` con un `FileView` (como `_sidebar.json`, sólo lectura) y
+lo normaliza con `SidebarModel.normalizeSessions` (tolerante; inválido → sin links). Cada fila de
+workspace con link muestra un indicador chico en el acento del tema, con tooltip "Claude conectado ·
+<proyecto> · desde HH:MM"; con `active: false`, atenuado y "Sesión terminada · <proyecto>". La IPC del
+plugin no cambia.
+
+### Seguridad
+
+- Los ids de sesión y de aviso se validan antes de usarlos como nombre de archivo; los hooks no
+  interpolan texto libre en el shell.
+- El contexto que inyecta `SessionStart` sale del plan ya validado, reducido a una línea por texto y con
+  tope de tamaño, y repite que el contenido del repo son datos, no instrucciones.
+- Toda lectura de JSON tiene el mismo tope de 256 KB que las escrituras.
 
 ## Errores y casos borde
 
 - Monitor guardado ausente → monitor con foco. Monitor desconectado con la sidebar encima → mismo fallback.
 - Workspace > 10 o especial (scratchpad) → no se lista; el panel 2 muestra el estado vacío.
-- Escritura concurrente de dos sesiones en el mismo workspace → el último `rename` gana; no hay corrupción.
+- Escritura concurrente en el mismo workspace → `wsbar.lock` la serializa; además el `rename` atómico evita
+  archivos corruptos. Con sesiones conectadas sólo una sesión escribe cada workspace.
 - `_sidebar.json` inválido → defaults en memoria y se reescribe en el próximo cambio.
 
 ## Pruebas
 
 - `SidebarModel.js`: `node --test` (ritmo, días, scroll, avisos pendientes, normalización).
 - `wsbar`: `python3 -m unittest` (validación, escritura atómica, autodetección con `hyprctl` simulado,
-  cálculo de percent).
+  cálculo de percent; conexión, restricción por sesión y hooks con payloads simulados en
+  `tests/wsbar/test_sessions.py`).
 - Plugin: verificación real en el escritorio — mostrar/ocultar, mover de monitor, resize, editar título,
   destello al cambiar foco, recarga al escribir con `wsbar`, scroll configurado; capturas con `grim`.

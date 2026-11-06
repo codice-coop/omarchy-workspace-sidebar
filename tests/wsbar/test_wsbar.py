@@ -47,6 +47,7 @@ class WsbarTestCase(unittest.TestCase):
     self.tmp = tempfile.mkdtemp(prefix="wsbar-test-")
     self.config = os.path.join(self.tmp, "config", "sidebar")
     self.data = os.path.join(self.tmp, "data")
+    self.state = os.path.join(self.tmp, "state")
     self.clients = os.path.join(self.tmp, "clients.json")
     self.hyprctl = os.path.join(self.tmp, "hyprctl")
     with open(self.hyprctl, "w") as f:
@@ -65,10 +66,14 @@ class WsbarTestCase(unittest.TestCase):
       json.dump(clients, f)
 
   def env(self, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("WSBAR_")}
+    # The suite runs inside Claude Code too: without dropping CLAUDE_CODE_SESSION_ID
+    # every write would be gated by the session links (tests opt in explicitly).
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("WSBAR_") and k != "CLAUDE_CODE_SESSION_ID"}
     env.update({
       "WSBAR_CONFIG_DIR": self.config,
       "WSBAR_DATA_DIR": self.data,
+      "WSBAR_STATE_DIR": self.state,
       "WSBAR_HYPRCTL": self.hyprctl,
       "WSBAR_FAKE_CLIENTS": self.clients,
     })

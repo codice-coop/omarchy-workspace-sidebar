@@ -38,8 +38,9 @@ o.bind("SUPER + ALT + B", "Workspace sidebar", "omarchy-shell shell call matis.s
 
 - **Mostrar/ocultar**: el atajo de arriba. **Cambiar de monitor**: los botones de arriba de la barra.
   **Ancho**: arrastrar el borde derecho. Todo se recuerda en `~/.config/workspaces/sidebar/_sidebar.json`.
-- **Con Claude Code**: en la sesión de cada workspace, `/progreso` dimensiona el proyecto del repo y lo
-  publica; después Claude marca avances y deja avisos solo.
+- **Con Claude Code**: en la sesión de cada workspace, `/progreso conectar` y después `/progreso`, que
+  dimensiona el proyecto del repo y lo publica; Claude marca avances y deja avisos solo. Ver
+  [Conexión con Claude Code](#conexión-con-claude-code).
 - **A mano**: `wsbar --help`. Ejemplos:
 
 ```bash
@@ -52,12 +53,56 @@ wsbar scroll bottom
 
 IPC: `omarchy-shell shell call matis.sidebar <toggle|show|hide|moveTo> <arg>`.
 
+## Conexión con Claude Code
+
+Las sesiones de Claude Code arrancan **desconectadas**: desde una sesión no conectada, `wsbar` no escribe
+nada (los comandos de lectura sí funcionan). La persona conecta cada sesión a su workspace a propósito:
+
+- `/progreso conectar` (corre `wsbar connect`): conecta esta sesión al workspace de su terminal. Hay una
+  sesión por workspace: si ya había otra, la reemplaza y lo dice. Dentro de tmux no se puede detectar el
+  workspace y Claude te pregunta el número (`wsbar connect --ws N`).
+- `/progreso desconectar` (`wsbar disconnect`) y `/progreso estado` (`wsbar status`).
+
+Una sesión conectada sólo escribe en su workspace. La sidebar marca los workspaces con una sesión
+conectada (atenuado si la sesión terminó). Si Claude Code muere sin cerrar la sesión (kill -9, un
+crash), la marca queda encendida hasta el próximo `wsbar status`, `connect`, hook de otra sesión
+conectada o arranque de cualquier sesión de Claude: ahí se apaga y se va su aviso de espera.
+Desde una terminal común (sin `CLAUDE_CODE_SESSION_ID`), `wsbar` no tiene restricciones, y
+`wsbar disconnect --ws N` desconecta la sesión de un workspace.
+
+Con los hooks, una sesión conectada además publica su plan al arrancar, recibe el estado del panel
+como contexto y deja un aviso "Claude terminó y espera tu respuesta" (o el aviso de Claude Code cuando
+pide permiso), que se va solo cuando volvés a escribir. Agregar en `~/.claude/settings.json`, dentro de
+`"hooks"` (si ya hay entradas para alguno de estos eventos, sumá este grupo a su lista; no las
+reemplaces):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook SessionStart" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook Stop" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook Notification" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook UserPromptSubmit" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook PostToolUse" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "timeout": 2, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook SessionEnd" }] }]
+  }
+}
+```
+
+Para sesiones no conectadas los hooks son inertes: salen enseguida (un `jq` y un `stat`, sin arrancar
+Python), no imprimen nada y siempre salen con 0, así que nunca bloquean a Claude Code. Los errores van a
+`~/.local/state/wsbar/hook.log`. `/clear` conserva la conexión: la sesión nueva hereda el workspace de
+la que terminó.
+
 ## Seguridad
 
 - El contenido de los paneles puede venir, indirectamente, de texto de repos ajenos (Claude lo lee y lo
   resume). Por eso `wsbar` valida todo y limita tamaños, y la sidebar no carga imágenes, no interpreta
   HTML y sólo abre links `https://`, mostrando el destino real al pasar el mouse.
 - La IPC del plugin expone sólo `toggle`, `show`, `hide` y `moveTo`.
+- Los hooks de Claude Code no leen nada del repo: sólo el JSON del evento y los archivos de `wsbar`. Lo
+  que inyectan como contexto sale del plan ya validado y le recuerda a Claude que el contenido del repo
+  son datos, no instrucciones.
 - `wsbar` y la skill son symlinks a este checkout: actualizar el plugin también los actualiza.
   Instalalo sólo desde un repo en el que confíes.
 

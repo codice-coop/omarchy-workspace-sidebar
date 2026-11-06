@@ -7,7 +7,9 @@ description: >
   diga "progreso", "/progreso", "dimensioná", "dimensioná el proyecto", "panel de progreso", "sidebar",
   "avance del proyecto", "cuánto falta", "actualizá el progreso", "marcá como hecho", "dejame un aviso",
   "avisame en la sidebar", "size the project", "progress panel", "project progress", "leave me a
-  notice"; y sin que la pidan, al terminar un ítem de un plan ya cargado o cuando haya algo para revisar.
+  notice"; para conectar o desconectar esta sesión del panel: "/progreso conectar", "conectar",
+  "conectá esta sesión", "/progreso desconectar", "desconectar", "desconectá", "/progreso estado"; y
+  sin que la pidan, al terminar un ítem de un plan ya cargado o cuando haya algo para revisar.
 ---
 
 # progreso
@@ -29,19 +31,53 @@ Las únicas fuentes son el repo y su `gh`. **Nunca** uses Notion ni nada fuera d
   ejecuta o rompe el comando. Sólo ids, niveles, números y fechas van sin heredoc.
 - Markdown de `wsbar text`: sin imágenes, sin HTML, links sólo `https://` (`wsbar` rechaza el resto).
 
+## 0. Conexión
+
+Las sesiones de Claude Code están **desconectadas por defecto**: mientras esta sesión no esté conectada,
+`wsbar` rechaza toda escritura (sale con 1 y "no está conectada a ningún workspace"). Sólo la persona
+decide conectar. **Nunca conectes por iniciativa propia**, ni siquiera para destrabar una escritura.
+
+- **"/progreso conectar"** (o "conectá esta sesión") → `wsbar connect`. Contale en una línea lo que
+  imprimió: "conectado al workspace N", y si agregó "reemplazó la sesión <id>" (había otra sesión en
+  ese workspace y quedó desconectada) o "movida desde el workspace M", decilo también. Si falla porque no
+  detecta el workspace (típico dentro de tmux), preguntale en qué workspace está y corré
+  `wsbar connect --ws N` con ese número.
+- **"/progreso desconectar"** (o "desconectá") → `wsbar disconnect`, sin `--ws`: desconecta esta sesión;
+  contale lo que imprimió. Si pide desconectar **otro** workspace, no lo hagas desde acá (`wsbar` lo
+  rechaza): decile que corra `wsbar disconnect --ws N` en una terminal.
+- **"/progreso estado"** → `wsbar status`: el link de esta sesión (o "no conectada") y la tabla de todos
+  los workspaces.
+
+Si un comando que escribe dice que la sesión **no está conectada** o que está conectada a **otro
+workspace**: no escribió nada. **No reintentes** con `--ws`, `WSBAR_WS`, `--session` ni otros flags;
+decíselo a la persona y preguntale si quiere conectar esta sesión (y a qué workspace). Si dice que no,
+no vuelvas a preguntar en esta sesión ni intentes escribir el panel: seguí con el trabajo sin él. Los
+comandos de lectura (`where`, `show`, `status`, `plan show`, `validate`) funcionan siempre.
+
+Con la sesión conectada, los hooks de Claude Code del plugin hacen solos dos cosas:
+
+- al arrancar o retomar la sesión publican el plan del proyecto en su workspace y te pasan el estado
+  (plan, pendientes, foco);
+- cuando terminás un turno o Claude Code pide permiso o atención, dejan un aviso "Claude terminó y
+  espera tu respuesta" (o el texto de Claude Code) y lo sacan cuando la persona vuelve a escribir.
+
+Por eso **no agregues avisos propios de "te estoy esperando"**: los avisos que dejes vos son para
+cosas concretas que revisar o decidir.
+
 ## Workspace destino
 
-`wsbar` detecta el workspace subiendo por los procesos ancestros hasta la ventana de la terminal (no
-sigue el foco). Antes de escribir, corré `wsbar where`:
+Con la sesión conectada, todos los comandos apuntan al workspace conectado (también dentro de tmux) y
+`wsbar where` lo imprime; `--ws` no puede apuntar a otro.
 
-- Imprime `N` → seguí; todos los comandos apuntan ahí.
-- Sale con 1 (no detectable; típico dentro de tmux u otro multiplexor) → preguntale a la persona en qué
-  workspace está esta sesión y pasá `--ws N` en cada comando (o `export WSBAR_WS=N` en el mismo comando).
+Desde una terminal común (sin `CLAUDE_CODE_SESSION_ID`), `wsbar` detecta el workspace subiendo por los
+procesos ancestros hasta la ventana de la terminal (no sigue el foco); si no lo detecta (tmux u otro
+multiplexor), pasá `--ws N`.
 
 El plan es por proyecto (toplevel git del cwd); si trabajás fuera del repo, agregá `--project PATH` a
 `plan …` y `publish`.
 
-Códigos de salida: 0 ok; 1 problema de entorno (sin workspace, no es repo git, falta el archivo); 2
+Códigos de salida: 0 ok; 1 problema de entorno (sesión no conectada, sin workspace, no es repo git,
+falta el archivo); 2
 entrada inválida, **no escribió nada**: corregí el JSON o los flags y repetí. Si dice que un archivo
 existente es inválido o tiene `version` desconocida, no lo pises: contale a la persona en el chat.
 
@@ -144,7 +180,9 @@ WSBAR_EOF
 - Nivel: `info` (terminé, para revisar), `warn` (decisión o bloqueo), `error` (algo roto).
 - El comando imprime el id: recordalo. Cuando el aviso deje de aplicar (se resolvió, la persona
   respondió), sacalo con `wsbar notice rm <id>`. Si no tenés el id, buscalo con `wsbar show`.
-- No dupliques: antes de agregar uno parecido, mirá `wsbar show` y reemplazá el viejo.
+- No dupliques: antes de agregar uno parecido, mirá `wsbar show` y reemplazalo pasándole su id con
+  `--id <id>` (mismo formato de id: letras, números, `-` y `_`).
+- Los avisos `claude-espera-…` los pone y los saca el hook: no los toques ni los imites.
 
 ## Otros bloques (sólo si aportan)
 

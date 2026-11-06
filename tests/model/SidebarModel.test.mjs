@@ -493,6 +493,39 @@ describe("sidebar state", () => {
     assert.deepEqual(next.dismissed, { "3": ["n1", "n2"] })
   })
 
+  test("dismiss drops ids of notices the workspace no longer has", () => {
+    const config = { blocks: [
+      { type: "notices", id: "avisos", items: [{ id: "keep", level: "info", text: "a" }, { id: "claude-espera-b", level: "info", text: "b" }] },
+      { type: "text", id: "t", text: "x" },
+    ] }
+    const ids = M.noticeIds(config)
+    assert.deepEqual(ids, ["keep", "claude-espera-b"])
+    const state = M.normalizeSidebarState(JSON.stringify({ version: 1,
+      dismissed: { 5: ["claude-espera-old1", "keep", "claude-espera-old2"], 3: ["n1"] } }))
+    const next = M.dismiss(state, 5, "claude-espera-b", ids)
+    assert.deepEqual(next.dismissed, { "5": ["keep", "claude-espera-b"], "3": ["n1"] })
+    // No config to tell (file missing or not loaded yet): nothing is pruned.
+    assert.equal(M.noticeIds(null), null)
+    assert.deepEqual(M.dismiss(state, 5, "z", M.noticeIds(null)).dismissed["5"],
+                     ["claude-espera-old1", "keep", "claude-espera-old2", "z"])
+  })
+
+  test("dismissed lists are capped to the newest 100 ids", () => {
+    let state = M.normalizeSidebarState("")
+    for (let i = 0; i < 1000; i++) state = M.dismiss(state, 5, "claude-espera-" + i)
+    assert.equal(state.dismissed["5"].length, 100)
+    assert.equal(state.dismissed["5"][0], "claude-espera-900")
+    assert.equal(state.dismissed["5"][99], "claude-espera-999")
+    const many = Array.from({ length: 5000 }, (_, i) => "id" + i)
+    const read = M.normalizeSidebarState(JSON.stringify({ version: 1, dismissed: { 2: many } }))
+    assert.deepEqual(read.dismissed["2"], many.slice(-100))
+  })
+
+  test("an oversized _sidebar.json reads as defaults", () => {
+    const big = JSON.stringify({ version: 1, monitor: "DP-1", titles: { 1: "x".repeat(300 * 1024) } })
+    assert.equal(M.normalizeSidebarState(big).monitor, "")
+  })
+
   test("dismiss keeps the rest of the state and ignores empty ids", () => {
     const state = M.setTitle(M.normalizeSidebarState(JSON.stringify({ monitor: "HDMI-A-1", width: 300, visible: false })), 2, "T")
     const next = M.dismiss(state, 2, "n1")
@@ -561,5 +594,90 @@ describe("security limits", () => {
     assert.equal(r.config.blocks.length, 50)
     assert.equal(r.config.blocks[0].text.length, 8001)
     assert.equal(r.config.blocks[1].items.length, 100)
+  })
+})
+
+describe("normalizeSessions", () => {
+  const LINK = { session: "abc-123_X", project: "/home/matis/Work/ejemplo", since: "2026-11-06T10:12", active: true }
+  const file = (workspaces, extra = {}) => JSON.stringify({ version: 1, workspaces, ...extra })
+
+  test("accepts the contract example unchanged", () => {
+    assert.deepEqual(M.normalizeSessions(file({ "5": LINK })), { "5": LINK })
+  })
+
+  test("broken, non-object, wrong-version or oversized files read as no sessions", () => {
+    for (const raw of ["{", "", undefined, null, "[]", "1", "null",
+                       JSON.stringify({ workspaces: { "5": LINK } }),
+                       JSON.stringify({ version: 2, workspaces: { "5": LINK } }),
+                       JSON.stringify({ version: 1, workspaces: [LINK] }),
+                       file({ "5": LINK }, { pad: "x".repeat(70 * 1024) })]) {
+      assert.deepEqual(M.normalizeSessions(raw), {}, String(raw).slice(0, 40))
+    }
+  })
+
+  test("only workspace keys 1..10 are kept", () => {
+    const ws = {}
+    for (const key of ["0", "1", "10", "11", "-1", "05", "1.0", "x", "__proto__"]) ws[key] = { ...LINK, session: "s" + key.replace(/\W/g, "") }
+    assert.deepEqual(Object.keys(M.normalizeSessions(file(ws))).sort(), ["1", "10"])
+  })
+
+  test("session ids must match the id rule", () => {
+    for (const bad of ["", "a b", "a/b", "../x", "a;b", "é", "x".repeat(129), 5, null, undefined]) {
+      assert.deepEqual(M.normalizeSessions(file({ "3": { ...LINK, session: bad } })), {}, String(bad))
+    }
+    assert.ok(M.normalizeSessions(file({ "3": { ...LINK, session: "x".repeat(128) } }))["3"])
+  })
+
+  test("a session listed twice keeps the lowest workspace", () => {
+    const result = M.normalizeSessions(file({ "7": LINK, "2": LINK, "4": { ...LINK, session: "other" } }))
+    assert.deepEqual(Object.keys(result).sort(), ["2", "4"])
+  })
+
+  test("bad fields degrade to defaults", () => {
+    const result = M.normalizeSessions(file({
+      "1": { session: "a" },
+      "2": { session: "b", project: "relative/path", since: "2026-11-06 10:12", active: "true" },
+      "3": { session: "c", project: "/" + "p".repeat(2000), since: "2026-02-30T10:00", active: 1 },
+      "4": { session: "d", project: 7, since: "2026-11-06T24:00", active: false },
+      "5": "not an object"
+    }))
+    const empty = { project: "", since: "", active: false }
+    assert.deepEqual(result, {
+      "1": { session: "a", ...empty }, "2": { session: "b", ...empty },
+      "3": { session: "c", ...empty }, "4": { session: "d", ...empty }
+    })
+  })
+
+  test("output carries only the known fields", () => {
+    const result = M.normalizeSessions(file({ "6": { ...LINK, extra: "<b>x</b>", notes: [1] } }))
+    assert.deepEqual(Object.keys(result["6"]).sort(), ["active", "project", "session", "since"])
+  })
+})
+
+describe("session tooltip", () => {
+  test("projectName takes the last path segment", () => {
+    assert.equal(M.projectName("/home/matis/Work/ejemplo"), "ejemplo")
+    assert.equal(M.projectName("/home/matis/Work/ejemplo/"), "ejemplo")
+    assert.equal(M.projectName("/"), "")
+    assert.equal(M.projectName(""), "")
+    assert.equal(M.projectName(null), "")
+    assert.equal(M.projectName("/a/" + "z".repeat(200)).length, 81)
+  })
+
+  test("active link: project and time of today", () => {
+    const link = { session: "s", project: "/w/ejemplo", since: "2026-11-06T10:12", active: true }
+    assert.equal(M.sessionTooltip(link, "2026-11-06"), "Claude conectado · ejemplo · desde 10:12")
+    assert.equal(M.sessionTooltip(link, "2026-11-07"), "Claude conectado · ejemplo · desde 06/11 10:12")
+    assert.equal(M.sessionTooltip({ ...link, project: "", since: "" }, "2026-11-06"), "Claude conectado")
+  })
+
+  test("ended link: no time", () => {
+    const link = { session: "s", project: "/w/ejemplo", since: "2026-11-06T10:12", active: false }
+    assert.equal(M.sessionTooltip(link, "2026-11-06"), "Sesión terminada · ejemplo")
+    assert.equal(M.sessionTooltip({ ...link, project: "" }, "2026-11-06"), "Sesión terminada")
+  })
+
+  test("no link, no tooltip", () => {
+    for (const bad of [null, undefined, "x", []]) assert.equal(M.sessionTooltip(bad, "2026-11-06"), "")
   })
 })

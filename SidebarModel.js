@@ -1,9 +1,9 @@
 .pragma library
 
 // Pure logic for the workspace sidebar: workspaceN.json normalization, pace
-// math for the progress strip, pending notices, scroll resolution and the
-// _sidebar.json UI state. Qt-free so it runs under `node --test`
-// (tests/model/). Dates are ISO strings; "today" is always passed in.
+// math for the progress strip, pending notices, scroll resolution, the
+// _sidebar.json UI state and the _sessions.json links. Qt-free so it runs
+// under `node --test` (tests/model/). Dates are ISO strings; "today" is always passed in.
 
 var MS_PER_DAY = 86400000
 var DEFAULT_WIDTH = 260
@@ -317,6 +317,12 @@ function cleanTitles(raw) {
   return titles
 }
 
+// Dismissed notice ids kept per workspace. The Claude Code hook gives every
+// "Claude espera" notice a new id, so the lists are pruned on dismiss and
+// capped here (the newest ids are kept).
+var MAX_DISMISSED = 100
+var MAX_STATE_CHARS = 256 * 1024
+
 function cleanDismissed(raw) {
   var dismissed = {}
   if (!isPlainObject(raw)) return dismissed
@@ -324,8 +330,12 @@ function cleanDismissed(raw) {
   for (var i = 0; i < keys.length; i++) {
     var list = Array.isArray(raw[keys[i]]) ? raw[keys[i]] : []
     var ids = []
-    for (var j = 0; j < list.length; j++) {
-      if (nonEmptyString(list[j]) && ids.indexOf(list[j]) === -1) ids.push(list[j])
+    var seen = {}
+    for (var j = list.length - 1; j >= 0 && ids.length < MAX_DISMISSED; j--) {
+      if (nonEmptyString(list[j]) && !Object.prototype.hasOwnProperty.call(seen, list[j])) {
+        seen[list[j]] = true
+        ids.unshift(list[j])
+      }
     }
     if (ids.length > 0) dismissed[keys[i]] = ids
   }
@@ -349,21 +359,45 @@ function sanitizeSidebarState(data) {
 // rewritten on the next change.
 function normalizeSidebarState(rawText) {
   var data = null
+  var source = String(rawText === undefined || rawText === null ? "" : rawText)
   try {
-    data = JSON.parse(String(rawText === undefined || rawText === null ? "" : rawText))
+    data = source.length > MAX_STATE_CHARS ? null : JSON.parse(source)
   } catch (e) {
     data = null
   }
   return sanitizeSidebarState(data)
 }
 
-function dismiss(state, ws, noticeId) {
+// Every notice id in a workspace config, or null when there is no config to
+// tell (missing or never loaded), so callers can skip pruning.
+function noticeIds(config) {
+  if (!isPlainObject(config) || !Array.isArray(config.blocks)) return null
+  var ids = []
+  for (var i = 0; i < config.blocks.length; i++) {
+    var block = config.blocks[i]
+    if (!isPlainObject(block) || block.type !== "notices" || !Array.isArray(block.items)) continue
+    for (var j = 0; j < block.items.length; j++) {
+      if (isPlainObject(block.items[j]) && nonEmptyString(block.items[j].id)) ids.push(block.items[j].id)
+    }
+  }
+  return ids
+}
+
+// currentIds: the notice ids the workspace has now (noticeIds). When given,
+// ids of notices that are gone are dropped: they can only come back with the
+// same id through `wsbar notice add --id`, and then showing them again is right.
+function dismiss(state, ws, noticeId, currentIds) {
   var next = sanitizeSidebarState(state)
   if (!nonEmptyString(noticeId)) return next
   var key = String(ws)
   var ids = next.dismissed[key] || []
-  if (ids.indexOf(noticeId) === -1) ids.push(noticeId)
-  next.dismissed[key] = ids
+  if (Array.isArray(currentIds)) {
+    ids = ids.filter(function(id) { return currentIds.indexOf(id) !== -1 })
+  }
+  var at = ids.indexOf(noticeId)
+  if (at !== -1) ids.splice(at, 1)
+  ids.push(noticeId)
+  next.dismissed[key] = ids.slice(-MAX_DISMISSED)
   return next
 }
 
@@ -377,6 +411,74 @@ function setTitle(state, ws, title) {
 
 function serializeSidebarState(state) {
   return JSON.stringify(sanitizeSidebarState(state), null, 2) + "\n"
+}
+
+// ---- _sessions.json (Claude Code sessions linked to workspaces)
+
+// Written only by wsbar (`wsbar connect`); the sidebar just reads it to mark
+// the workspaces that have a session. Tolerant like _sidebar.json: anything
+// broken reads as "no sessions", and bad entries are dropped one by one.
+var MAX_SESSIONS_CHARS = 64 * 1024
+var MAX_PROJECT = 1024
+var SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
+var SINCE_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/
+
+function validSessionId(value) {
+  return typeof value === "string" && SESSION_ID_RE.test(value)
+}
+
+function normalizeSessions(rawText) {
+  var sessions = {}
+  var source = String(rawText === undefined || rawText === null ? "" : rawText)
+  if (source.length > MAX_SESSIONS_CHARS) return sessions
+  var data
+  try {
+    data = JSON.parse(source)
+  } catch (e) {
+    return sessions
+  }
+  if (!isPlainObject(data) || data.version !== 1 || !isPlainObject(data.workspaces)) return sessions
+
+  // A session lives in one workspace; a file that lists it twice keeps the
+  // lowest-numbered one, so the indicator never shows up in two rows.
+  var seen = {}
+  for (var n = 1; n <= 10; n++) {
+    var key = String(n)
+    if (!Object.prototype.hasOwnProperty.call(data.workspaces, key)) continue
+    var raw = data.workspaces[key]
+    if (!isPlainObject(raw) || !validSessionId(raw.session) || seen[raw.session]) continue
+    seen[raw.session] = true
+    var project = typeof raw.project === "string" && raw.project.length <= MAX_PROJECT
+      && (raw.project === "" || raw.project.charAt(0) === "/") ? raw.project : ""
+    var since = typeof raw.since === "string" && SINCE_RE.test(raw.since) && dayNumber(raw.since) !== null
+      ? raw.since : ""
+    sessions[key] = { session: raw.session, project: project, since: since, active: raw.active === true }
+  }
+  return sessions
+}
+
+// Last path segment of a project path ("" when there is none), capped for a
+// tooltip line.
+function projectName(path) {
+  if (typeof path !== "string") return ""
+  var parts = path.split("/").filter(function(part) { return part !== "" })
+  return parts.length > 0 ? cap(parts[parts.length - 1], 80) : ""
+}
+
+// "Claude conectado · <project> · desde HH:MM" for an active link (the date
+// joins the time when the link is from another day), "Sesión terminada ·
+// <project>" for an ended one. Empty parts are left out.
+function sessionTooltip(link, today) {
+  if (!isPlainObject(link)) return ""
+  var parts = [link.active === true ? "Claude conectado" : "Sesión terminada"]
+  var name = projectName(link.project)
+  if (name !== "") parts.push(name)
+  if (link.active === true && typeof link.since === "string" && SINCE_RE.test(link.since)) {
+    var day = link.since.slice(0, 10)
+    var time = link.since.slice(11, 16)
+    parts.push("desde " + (day === today ? time : day.slice(8, 10) + "/" + day.slice(5, 7) + " " + time))
+  }
+  return parts.join(" · ")
 }
 
 // ---- text blocks

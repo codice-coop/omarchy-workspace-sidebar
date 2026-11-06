@@ -12,7 +12,9 @@ import "SidebarModel.js" as SidebarModel
 // Left sidebar: monitor selector, the workspace list, and the progress panel of
 // the focused workspace. Content comes from ~/.config/workspaces/sidebar/
 // workspaceN.json (written by wsbar); the sidebar's own UI state lives next to
-// it in _sidebar.json, which only this plugin writes.
+// it in _sidebar.json, which only this plugin writes. _sessions.json, also
+// written by wsbar (`wsbar connect`), says which workspaces have a Claude Code
+// session; the plugin only reads it.
 //
 // The shell's IPC can call any function on a plugin's root item, so this
 // controller is not the root: Sidebar.qml wraps it and exposes only toggle,
@@ -29,6 +31,8 @@ Item {
   readonly property bool ready: dirReady && stateLoaded
 
   property var uiState: SidebarModel.normalizeSidebarState("")
+  // {"5": {session, project, since, active}}; {} while there is no file.
+  property var sessions: ({})
   // Live width while the edge is being dragged; -1 otherwise.
   property int dragWidth: -1
   readonly property int panelWidth: dragWidth > 0 ? dragWidth : uiState.width
@@ -62,6 +66,11 @@ Item {
     for (var i = 0; i < files.length; i++)
       if (files[i] && files[i].ws === ws) return files[i]
     return null
+  }
+
+  function sessionFor(ws) {
+    var link = sessions[String(ws)]
+    return link ? link : null
   }
 
   function dismissedFor(ws) {
@@ -128,7 +137,8 @@ Item {
   }
 
   function dismissNotice(ws, noticeId) {
-    saveState(SidebarModel.dismiss(uiState, ws, noticeId))
+    var file = fileFor(ws)
+    saveState(SidebarModel.dismiss(uiState, ws, noticeId, SidebarModel.noticeIds(file ? file.config : null)))
   }
 
   function beginEdit(ws) {
@@ -188,6 +198,18 @@ Item {
       root.finishLoad()
     }
     onLoadFailed: root.finishLoad()
+  }
+
+  // Read-only and watched: wsbar replaces it atomically on connect/disconnect
+  // and from the Claude Code hooks. A missing or broken file means no links.
+  FileView {
+    id: sessionsFile
+    path: root.dirReady ? root.dataDir + "/_sessions.json" : ""
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.sessions = SidebarModel.normalizeSessions(text())
+    onLoadFailed: root.sessions = ({})
   }
 
   Variants {

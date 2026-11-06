@@ -5,8 +5,9 @@ import qs.Commons as Commons
 import qs.Ui
 import "SidebarModel.js" as SidebarModel
 
-// One workspace: number, title, and the count of notices not yet dismissed.
-// Click focuses it; double-click edits the title (Enter saves, Esc cancels).
+// One workspace: number, title, a mark when a Claude Code session is
+// connected to it, and the count of notices not yet dismissed. Click focuses
+// it; double-click edits the title (Enter saves, Esc cancels).
 Item {
   id: root
 
@@ -22,6 +23,17 @@ Item {
   readonly property var file: sidebar.fileFor(ws)
   readonly property int pending: file ? SidebarModel.pendingCount(file.config, sidebar.dismissedFor(ws)) : 0
   readonly property string title: SidebarModel.titleFor(sidebar.uiState, ws)
+  // Link from _sessions.json, or null. An ended session keeps its link (a
+  // resumed one picks it up again), so it shows dimmed instead of vanishing.
+  readonly property var session: sidebar.sessionFor(ws)
+  readonly property bool sessionActive: session !== null && session.active === true
+  // The row's MouseArea takes the hover, so the mark's tooltip follows the
+  // pointer position over it instead of a handler of its own.
+  readonly property bool sessionHovered: {
+    if (!mouse.containsMouse || !sessionMark.visible) return false
+    var point = sessionMark.mapFromItem(mouse, mouse.mouseX, mouse.mouseY)
+    return sessionMark.contains(point)
+  }
 
   implicitHeight: Style.spacing.popupRowHeight
 
@@ -89,8 +101,8 @@ Item {
     Text {
       anchors.left: number.right
       anchors.leftMargin: Style.spacing.lg
-      anchors.right: badge.visible ? badge.left : parent.right
-      anchors.rightMargin: badge.visible ? Style.spacing.md : 0
+      anchors.right: trailing.width > 0 ? trailing.left : parent.right
+      anchors.rightMargin: trailing.width > 0 ? Style.spacing.md : 0
       anchors.verticalCenter: parent.verticalCenter
       visible: !root.editing
       textFormat: Text.PlainText
@@ -129,25 +141,49 @@ Item {
       }
     }
 
-    Rectangle {
-      id: badge
+    Row {
+      id: trailing
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      visible: root.pending > 0 && !root.editing
-      height: badgeText.implicitHeight + Style.spacing.xxs * 2
-      width: Math.max(height, badgeText.implicitWidth + Style.spacing.sm * 2)
-      radius: height / 2
-      color: Commons.Color.accent
+      spacing: Style.spacing.sm
+      visible: !root.editing
 
       Text {
-        id: badgeText
-        anchors.centerIn: parent
+        id: sessionMark
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.session !== null
         textFormat: Text.PlainText
-        text: String(root.pending)
-        color: Commons.Color.background
+        // nf-md-robot
+        text: "\udb81\udea9"
+        color: root.sessionActive ? Commons.Color.accent : Commons.Color.muted
         font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        font.bold: true
+        font.pixelSize: Style.font.body
+
+        PanelToolTip {
+          visible: root.sessionHovered && text !== ""
+          text: SidebarModel.sessionTooltip(root.session, root.sidebar.today)
+        }
+      }
+
+      Rectangle {
+        id: badge
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.pending > 0
+        height: badgeText.implicitHeight + Style.spacing.xxs * 2
+        width: Math.max(height, badgeText.implicitWidth + Style.spacing.sm * 2)
+        radius: height / 2
+        color: Commons.Color.accent
+
+        Text {
+          id: badgeText
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: String(root.pending)
+          color: Commons.Color.background
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
       }
     }
   }
