@@ -1,6 +1,6 @@
 import QtQuick
 
-// Plugin entry point. The shell's IPC (`omarchy-shell shell call matis.sidebar
+// Plugin entry point. The shell's IPC (`omarchy-shell shell call io.github.codice-coop.workspace-sidebar
 // <method> <arg>`) can call any function on this root item, so it holds only
 // the public surface — toggle, show, hide, moveTo <monitor> — and delegates to
 // SidebarController, whose internals stay out of reach.

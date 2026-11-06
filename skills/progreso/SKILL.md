@@ -1,7 +1,7 @@
 ---
 name: progreso
 description: >
-  Mantiene el panel de progreso de la sidebar de workspaces (plugin matis.sidebar) con el CLI `wsbar`:
+  Mantiene el panel de progreso de la sidebar de workspaces (plugin io.github.codice-coop.workspace-sidebar) con el CLI `wsbar`:
   dimensiona el proyecto del repo actual (objetivo, ítems con peso, hitos, foco, fecha límite), marca
   avances al terminar ítems planificados y deja avisos para que la persona revise. Usala cuando alguien
   diga "progreso", "/progreso", "dimensioná", "dimensioná el proyecto", "panel de progreso", "sidebar",

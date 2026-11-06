@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code hook for the matis.sidebar panel. In Claude settings:
+# Claude Code hook for the io.github.codice-coop.workspace-sidebar panel. In Claude settings:
 #   "command": "<repo>/hooks/claude-hook <EventName>"
 # for SessionStart, Stop, Notification, UserPromptSubmit, PostToolUse and SessionEnd.
 #

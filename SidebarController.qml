@@ -264,7 +264,7 @@ Item {
     color: Commons.Color.bar.background
     surfaceFormat.opaque: false
 
-    WlrLayershell.namespace: "matis-sidebar"
+    WlrLayershell.namespace: "workspace-sidebar"
     WlrLayershell.layer: WlrLayer.Top
     WlrLayershell.keyboardFocus: root.editingWs !== 0
       ? (root.focusPrimed ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)

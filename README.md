@@ -1,121 +1,195 @@
-# Workspace sidebar para Omarchy
+# Workspace Sidebar for Omarchy
 
-Barra lateral izquierda para el shell de Omarchy 4 (`omarchy-shell`). Muestra:
+A left sidebar for the Omarchy 4 shell that keeps two things in view at all times: **which workspace has
+focus**, and **how far along the project on that workspace is**. It pairs with Claude Code, so each
+workspace's agent session can keep its own progress panel up to date and leave you notices.
 
-- **Workspaces**: número y título editable (doble click). El workspace con foco queda resaltado y destella
-  al recibir el foco; los vacíos se ven atenuados. Cada fila cuenta los avisos sin cerrar.
-- **Progreso del workspace con foco**: una franja vertical con el % del objetivo actual y una marca de
-  dónde debería estar hoy según la fecha límite (el atraso se ve rayado). Al lado, bloques: avisos, foco
-  (ahora / después), hitos, notas en Markdown y barras secundarias.
+<img src="preview.png" alt="Workspace Sidebar" width="284">
 
-El contenido del panel de progreso sale de `~/.config/workspaces/sidebar/workspaceN.json`, uno por
-workspace, y se actualiza solo cuando el archivo cambia. Lo escribe el CLI `wsbar`, pensado para que lo
-use una sesión de Claude Code con la skill `progreso` incluida.
+> The interface text is in Spanish (e.g. *Ahora*, *Después*, *Hitos*). Everything else (files, CLI,
+> configuration) is language-neutral.
 
-## Instalación
+## Features
 
-Requisitos: Omarchy 4 (shell basado en Quickshell) y Python 3.
+- **Workspace list** — number and an editable title per workspace (double-click to rename). The focused
+  workspace is highlighted and briefly glows when it gains focus; empty workspaces are dimmed, like the
+  bar's workspace widget. Each row counts its unread notices.
+- **Progress panel** for the focused workspace, with its own scroll:
+  - a thin vertical **progress strip** filled bottom-up, with a tick showing where you should be today
+    given the start date and deadline; falling behind is hatched, so it reads in any theme;
+  - blocks: **notices** (dismissable), **focus** (now / next), **milestones**, Markdown **notes**, and
+    secondary **meters**.
+- **Live updates** — each workspace's content is a JSON file that the panel watches.
+- **Monitor selector** at the top, show/hide via IPC or a keybinding, resizable by dragging the right
+  edge. Position, width and visibility persist.
+- **Theme-aware** — colors, fonts and spacing come from the active Omarchy theme.
+- **Optional Claude Code integration** — a skill and hooks let a session size the project, mark
+  progress, and post "waiting for you" notices, only for sessions you explicitly connect.
+
+## Requirements
+
+| Dependency | Needed for | Notes |
+|---|---|---|
+| Omarchy 4 (Quattro) | the sidebar | Quickshell-based `omarchy-shell` |
+| Python 3 (stdlib only) | `wsbar`, the CLI that writes panel content | preinstalled on Omarchy |
+| `jq` | Claude Code hooks | preinstalled on Omarchy |
+| [Claude Code](https://claude.com/claude-code) | optional integration | not needed for the sidebar itself |
+
+No network access, no root, no services, no remote builds.
+
+## Install
 
 ```bash
-omarchy plugin add <url-de-este-repo> --enable
+omarchy plugin add https://github.com/codice-coop/omarchy-workspace-sidebar.git --enable
 omarchy restart shell
 ```
 
-El plugin queda en `~/.config/omarchy/plugins/matis.sidebar/`. Para el CLI y la skill:
+The sidebar appears on the focused monitor. The plugin lives in
+`~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/`.
 
-```bash
-ln -sfn ~/.config/omarchy/plugins/matis.sidebar/bin/wsbar ~/.local/bin/wsbar
-ln -sfn ~/.config/omarchy/plugins/matis.sidebar/skills/progreso ~/.claude/skills/progreso
-```
+Optional steps — nothing below is done for you; each one edits your own configuration only if you run it.
 
-Atajo para mostrar/ocultar, en `~/.config/hypr/bindings.lua`:
+**Keybinding** — add to `~/.config/hypr/bindings.lua` (check that the combo is free in your setup):
 
 ```lua
-o.bind("SUPER + ALT + B", "Workspace sidebar", "omarchy-shell shell call matis.sidebar toggle ''")
+o.bind("SUPER + ALT + B", "Workspace sidebar", "omarchy-shell shell call io.github.codice-coop.workspace-sidebar toggle ''")
 ```
 
-## Uso
-
-- **Mostrar/ocultar**: el atajo de arriba. **Cambiar de monitor**: los botones de arriba de la barra.
-  **Ancho**: arrastrar el borde derecho. Todo se recuerda en `~/.config/workspaces/sidebar/_sidebar.json`.
-- **Con Claude Code**: en la sesión de cada workspace, `/progreso conectar` y después `/progreso`, que
-  dimensiona el proyecto del repo y lo publica; Claude marca avances y deja avisos solo. Ver
-  [Conexión con Claude Code](#conexión-con-claude-code).
-- **A mano**: `wsbar --help`. Ejemplos:
+**CLI** — put `wsbar` on your `PATH`:
 
 ```bash
-wsbar where                                              # workspace de esta terminal
-wsbar progress --label "Release 1.2" --percent 40 --start 2026-11-01 --deadline 2026-11-30
-wsbar focus --now "Webhook de pagos" --next "Reintentos"
-wsbar notice add --level warn "CI rojo en main"
-wsbar scroll bottom
+ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/bin/wsbar ~/.local/bin/wsbar
 ```
 
-IPC: `omarchy-shell shell call matis.sidebar <toggle|show|hide|moveTo> <arg>`.
+**Claude Code** — see [Claude Code integration](#claude-code-integration).
 
-## Conexión con Claude Code
+## Usage
 
-Las sesiones de Claude Code arrancan **desconectadas**: desde una sesión no conectada, `wsbar` no escribe
-nada (los comandos de lectura sí funcionan). La persona conecta cada sesión a su workspace a propósito:
+- **Show / hide**: the keybinding, or
+  `omarchy-shell shell call io.github.codice-coop.workspace-sidebar <toggle|show|hide> ''`.
+- **Move to another monitor**: the buttons at the top, or `… moveTo <monitor-name>`.
+- **Resize**: drag the right edge (180–600 px).
+- **Rename a workspace**: double-click its title, Enter to save, Esc to cancel, empty to reset.
+- **Dismiss a notice**: the × on the notice.
 
-- `/progreso conectar` (corre `wsbar connect`): conecta esta sesión al workspace de su terminal. Hay una
-  sesión por workspace: si ya había otra, la reemplaza y lo dice. Dentro de tmux no se puede detectar el
-  workspace y Claude te pregunta el número (`wsbar connect --ws N`).
-- `/progreso desconectar` (`wsbar disconnect`) y `/progreso estado` (`wsbar status`).
+### Writing panel content
 
-Una sesión conectada sólo escribe en su workspace. La sidebar marca los workspaces con una sesión
-conectada (atenuado si la sesión terminó). Si Claude Code muere sin cerrar la sesión (kill -9, un
-crash), la marca queda encendida hasta el próximo `wsbar status`, `connect`, hook de otra sesión
-conectada o arranque de cualquier sesión de Claude: ahí se apaga y se va su aviso de espera.
-Desde una terminal común (sin `CLAUDE_CODE_SESSION_ID`), `wsbar` no tiene restricciones, y
-`wsbar disconnect --ws N` desconecta la sesión de un workspace.
+Each workspace reads `~/.config/workspaces/sidebar/workspaceN.json`. Write it with `wsbar`, which
+validates every change and writes atomically, so the panel never sees a half-written file. By default it
+targets the workspace of the terminal it runs in.
 
-Con los hooks, una sesión conectada además publica su plan al arrancar, recibe el estado del panel
-como contexto y deja un aviso "Claude terminó y espera tu respuesta" (o el aviso de Claude Code cuando
-pide permiso), que se va solo cuando volvés a escribir. Agregar en `~/.claude/settings.json`, dentro de
-`"hooks"` (si ya hay entradas para alguno de estos eventos, sumá este grupo a su lista; no las
-reemplaces):
+```bash
+wsbar where                                            # workspace of this terminal
+wsbar progress --label "Release 1.2" --percent 40 --start 2026-11-01 --deadline 2026-11-30
+wsbar focus --now "Payments webhook" --next "Retry policy" --next "Receipt emails"
+wsbar notice add --level warn -- "CI is red on main"
+wsbar milestones set -- '[{"label":"Checkout","status":"current","date":"2026-11-12"}]'
+wsbar text notes -- "Waiting for **production** credentials"
+wsbar scroll bottom                                    # or top, a block id, or 0..1
+wsbar --help
+```
+
+For ongoing projects, `wsbar plan set|done|show` and `wsbar publish` keep a weighted plan per git
+repository (in `~/.local/share/wsbar/projects/`) and derive the percentage from it.
+
+## Configure
+
+| What | Where |
+|---|---|
+| Monitor, width, visibility, titles, dismissed notices | `~/.config/workspaces/sidebar/_sidebar.json` (written by the sidebar) |
+| Panel content | `~/.config/workspaces/sidebar/workspaceN.json` (written by `wsbar`) |
+| Per-project plans | `~/.local/share/wsbar/projects/` |
+| Claude Code session links | `~/.config/workspaces/sidebar/_sessions.json`, `~/.local/state/wsbar/` |
+
+The full file format is in the
+[design spec](docs/superpowers/specs/2026-11-06-workspace-sidebar-design.md).
+
+## Claude Code integration
+
+Optional. It lets one Claude Code session per workspace keep that workspace's panel current.
+
+**1. Install the skill** (the `progreso` skill, instructions in Spanish):
+
+```bash
+ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/skills/progreso ~/.claude/skills/progreso
+```
+
+**2. Install the hooks** — link the hook entry point, then add the six events to the `"hooks"` object of
+`~/.claude/settings.json`. If an event already has entries (yours or another tool's), append this group to
+its list instead of replacing it.
+
+```bash
+ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/hooks/claude-hook ~/.local/bin/wsbar-claude-hook
+```
 
 ```json
 {
   "hooks": {
-    "SessionStart":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook SessionStart" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook Stop" }] }],
-    "Notification":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook Notification" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook UserPromptSubmit" }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook PostToolUse" }] }],
-    "SessionEnd":       [{ "hooks": [{ "type": "command", "timeout": 2, "command": "$HOME/.config/omarchy/plugins/matis.sidebar/hooks/claude-hook SessionEnd" }] }]
+    "SessionStart":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.local/bin/wsbar-claude-hook SessionStart" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.local/bin/wsbar-claude-hook Stop" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.local/bin/wsbar-claude-hook Notification" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.local/bin/wsbar-claude-hook UserPromptSubmit" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "timeout": 5, "command": "$HOME/.local/bin/wsbar-claude-hook PostToolUse" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "timeout": 2, "command": "$HOME/.local/bin/wsbar-claude-hook SessionEnd" }] }]
   }
 }
 ```
 
-Para sesiones no conectadas los hooks son inertes: salen enseguida (un `jq` y un `stat`, sin arrancar
-Python), no imprimen nada y siempre salen con 0, así que nunca bloquean a Claude Code. Los errores van a
-`~/.local/state/wsbar/hook.log`. `/clear` conserva la conexión: la sesión nueva hereda el workspace de
-la que terminó.
+**3. Connect a session.** Sessions start **disconnected**: a session that is not connected cannot write to
+any panel, and the hooks do nothing for it. In the session you want on a workspace:
 
-## Seguridad
+- `/progreso conectar` — connects it to the workspace of its terminal (one session per workspace;
+  connecting another replaces the previous one and says so). The row shows a small indicator.
+- `/progreso` — Claude reads the repo (docs, plans, git log, open PRs), proposes a goal, weighted items,
+  milestones and focus, asks for the deadline if it is not written down, and publishes it.
+- From then on it marks items done, updates the focus, and leaves notices; the hooks republish the plan at
+  session start and post a "Claude is waiting for you" notice that clears when you reply.
+- `/progreso desconectar` and `/progreso estado` to disconnect or check.
 
-- El contenido de los paneles puede venir, indirectamente, de texto de repos ajenos (Claude lo lee y lo
-  resume). Por eso `wsbar` valida todo y limita tamaños, y la sidebar no carga imágenes, no interpreta
-  HTML y sólo abre links `https://`, mostrando el destino real al pasar el mouse.
-- La IPC del plugin expone sólo `toggle`, `show`, `hide` y `moveTo`.
-- Los hooks de Claude Code no leen nada del repo: sólo el JSON del evento y los archivos de `wsbar`. Lo
-  que inyectan como contexto sale del plan ya validado y le recuerda a Claude que el contenido del repo
-  son datos, no instrucciones.
-- `wsbar` y la skill son symlinks a este checkout: actualizar el plugin también los actualiza.
-  Instalalo sólo desde un repo en el que confíes.
+From a plain terminal (outside Claude Code) `wsbar` has no restrictions.
 
-## Formato
+For unconnected sessions the hooks exit in a few milliseconds (one `jq` call and a file check, no Python),
+print nothing and always exit 0, so they never block Claude Code. Errors go to
+`~/.local/state/wsbar/hook.log`.
 
-El formato de `workspaceN.json` y el diseño completo están en
-[`docs/superpowers/specs/2026-11-06-workspace-sidebar-design.md`](docs/superpowers/specs/2026-11-06-workspace-sidebar-design.md).
-
-## Desarrollo
+## Remove
 
 ```bash
-node --test tests/model/                          # lógica del panel (SidebarModel.js)
-python3 -m unittest discover -s tests/wsbar       # wsbar
-omarchy plugin validate .
-omarchy restart shell                             # el plugin es keepLoaded: los cambios aplican al reiniciar
+omarchy plugin remove io.github.codice-coop.workspace-sidebar
+rm -f ~/.local/bin/wsbar ~/.local/bin/wsbar-claude-hook ~/.claude/skills/progreso
 ```
+
+Then delete the six `wsbar-claude-hook` entries from `~/.claude/settings.json` and the keybinding line from
+`~/.config/hypr/bindings.lua` if you added them. To also delete the data:
+
+```bash
+rm -rf ~/.config/workspaces/sidebar ~/.local/share/wsbar ~/.local/state/wsbar
+```
+
+## Security
+
+Plugins run unsandboxed inside `omarchy-shell`, which also hosts the lock screen and the polkit agent, so
+the plugin is written defensively:
+
+- **Untrusted content.** Panel text can originate, indirectly, from repositories an agent reads. `wsbar`
+  validates every write and caps sizes, nesting and lengths; the sidebar caps them again, never loads
+  images, never interprets HTML, and only opens `https://` links, showing the real target on hover.
+- **Minimal IPC.** The plugin exposes only `toggle`, `show`, `hide` and `moveTo`.
+- **No shell interpolation.** Commands are run with argument lists; the only workspace dispatch accepts an
+  integer 1–10.
+- **Agent control.** Claude Code sessions can write only to the workspace you connected them to.
+- **Updates.** `wsbar`, the skill and the hook are symlinks into the plugin checkout, so
+  `omarchy plugin update` updates them too. Install only from a source you trust.
+
+## Development
+
+```bash
+node --test tests/model/                        # sidebar logic (SidebarModel.js)
+python3 -m unittest discover -s tests/wsbar     # wsbar and hooks
+omarchy plugin validate .
+omarchy restart shell                           # the plugin is keepLoaded: QML changes apply on restart
+```
+
+## License
+
+[MIT](LICENSE) © 2026 CODICE

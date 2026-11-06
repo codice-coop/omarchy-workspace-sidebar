@@ -20,7 +20,7 @@ Criterios de éxito:
 
 Tres piezas, en este orden de construcción (más la conexión con sesiones, sección 5):
 
-1. **Plugin `matis.sidebar`** (QML, Quickshell dentro de `omarchy-shell`).
+1. **Plugin `io.github.codice-coop.workspace-sidebar`** (QML, Quickshell dentro de `omarchy-shell`).
 2. **CLI `wsbar`**: única vía recomendada de escritura del contenido; valida y escribe atómico.
 3. **Skill de Claude `progreso`**: dimensiona, avanza y avisa usando `wsbar`.
 
@@ -35,7 +35,7 @@ contenido del panel 2 desde la UI (salvo cerrar avisos).
 Claude Code ──(skill progreso)──► wsbar ──escribe atómico──► ~/.config/workspaces/sidebar/workspaceN.json
                                     │                                   │ (FileView watchChanges)
                                     └─► ~/.local/share/wsbar/projects/  ▼
-                                         (detalle por proyecto)   matis.sidebar (omarchy-shell)
+                                         (detalle por proyecto)   io.github.codice-coop.workspace-sidebar (omarchy-shell)
                                                                         │
                                 Hyprland (Quickshell.Hyprland) ────────►┤ foco, ocupación, monitores
                                                                         ▼
@@ -47,17 +47,17 @@ Claude Code ──(skill progreso)──► wsbar ──escribe atómico──�
 Se sigue al pie de la letra la guía de plugins de Omarchy (`$OMARCHY_PATH/shell/README.md`, "Installing
 by hand" y "Installing a third-party plugin"):
 
-- El repo **es** el directorio del plugin: `~/.config/omarchy/plugins/matis.sidebar/`, con `manifest.json`
+- El repo **es** el directorio del plugin: `~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/`, con `manifest.json`
   en la raíz. Es la misma forma que deja `omarchy plugin add` (un checkout git), así que exportarlo es
   publicar este repo y que otros lo instalen con `omarchy plugin add <url>`. Sin symlinks.
 - Ciclo de desarrollo: guardar (recarga automática; `omarchy-shell shell rescanPlugins` si no aplica;
   `omarchy restart shell` para cambios en el plugin por ser `keepLoaded`), `omarchy plugin validate
-  ~/.config/omarchy/plugins/matis.sidebar`, y `omarchy plugin enable matis.sidebar` la primera vez.
+  ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar`, y `omarchy plugin enable io.github.codice-coop.workspace-sidebar` la primera vez.
 - `wsbar` (`bin/wsbar`) y la skill (`skills/progreso/`) viajan en el mismo repo, porque son parte de la
   funcionalidad exportable. No son código del plugin, así que se exponen fuera de él: `~/.local/bin/wsbar`
   y `~/.claude/skills/progreso` apuntan al repo.
 
-## 1. Plugin `matis.sidebar`
+## 1. Plugin `io.github.codice-coop.workspace-sidebar`
 
 ### Manifest
 
@@ -71,7 +71,7 @@ plugin requieren `omarchy restart shell` (el hot-reload no reemplaza instancias 
   las ventanas se reacomodan al costado. Convive con la barra de Omarchy (hoy abajo).
 - Un solo monitor a la vez. Colores, tipografía y espaciados desde `qs.Commons` (`Color`, `Style`) para
   seguir el tema activo y sus cambios.
-- **Ocultar/mostrar**: `Super+Alt+B` (libre hoy) → `omarchy-shell shell call matis.sidebar toggle`,
+- **Ocultar/mostrar**: `Super+Alt+B` (libre hoy) → `omarchy-shell shell call io.github.codice-coop.workspace-sidebar toggle`,
   agregado en `~/.config/hypr/bindings.lua`. Oculta = sin ventana y sin zona exclusiva.
 - **Ancho**: se arrastra el borde derecho (handle de ~4 px, cursor de resize). Mínimo 180 px, máximo
   600 px.

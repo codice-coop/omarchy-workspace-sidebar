@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "matis.sidebar",
+  "id": "io.github.codice-coop.workspace-sidebar",
   "name": "Workspace sidebar",
   "version": "0.1.0",
-  "author": "Matís",
-  "description": "Left sidebar with the workspace list and the progress of each workspace's project.",
+  "author": "Matías Verges · CODICE",
+  "description": "Left sidebar with the workspace list and a live progress panel per workspace, kept up to date by Claude Code sessions you connect.",
   "kinds": [
     "panel"
   ],
   "keepLoaded": true,
   "entryPoints": {
     "panel": "Sidebar.qml"
-  }
+  },
+  "license": "MIT"
 }

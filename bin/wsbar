@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wsbar: writes the content shown by the matis.sidebar panel.
+"""wsbar: writes the content shown by the io.github.codice-coop.workspace-sidebar panel.
 
 Every write validates the whole document, writes a temp file in the same
 directory and renames it over the target, so the sidebar never reads a
@@ -1534,7 +1534,7 @@ def take_handoff(links, sid):
 
 
 def session_context(ws, link, plan, doc):
-  lines = ["Sidebar de workspaces (matis.sidebar): esta sesión de Claude Code está conectada al workspace %d%s."
+  lines = ["Sidebar de workspaces (io.github.codice-coop.workspace-sidebar): esta sesión de Claude Code está conectada al workspace %d%s."
            % (ws, " · proyecto " + plain(link["project"], 200) if link["project"] else
               " · sin proyecto (no es un repo git; usá --project PATH en plan/publish)")]
   pending = []
@@ -1744,7 +1744,7 @@ def build_parser():
   proj = argparse.ArgumentParser(add_help=False)
   proj.add_argument("--project", default=argparse.SUPPRESS, metavar="PATH", help="project directory (default: git toplevel of cwd)")
 
-  p = Parser(prog="wsbar", description="Write the matis.sidebar progress panel of a Hyprland workspace.",
+  p = Parser(prog="wsbar", description="Write the io.github.codice-coop.workspace-sidebar progress panel of a Hyprland workspace.",
              epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
   p.add_argument("--ws", help="target workspace 1..10 (overrides WSBAR_WS and autodetection)")
   sub = p.add_subparsers(dest="cmd", metavar="command", parser_class=Parser)
