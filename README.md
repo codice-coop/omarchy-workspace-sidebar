@@ -52,6 +52,15 @@ wsbar scroll bottom
 
 IPC: `omarchy-shell shell call matis.sidebar <toggle|show|hide|moveTo> <arg>`.
 
+## Seguridad
+
+- El contenido de los paneles puede venir, indirectamente, de texto de repos ajenos (Claude lo lee y lo
+  resume). Por eso `wsbar` valida todo y limita tamaños, y la sidebar no carga imágenes, no interpreta
+  HTML y sólo abre links `https://`, mostrando el destino real al pasar el mouse.
+- La IPC del plugin expone sólo `toggle`, `show`, `hide` y `moveTo`.
+- `wsbar` y la skill son symlinks a este checkout: actualizar el plugin también los actualiza.
+  Instalalo sólo desde un repo en el que confíes.
+
 ## Formato
 
 El formato de `workspaceN.json` y el diseño completo están en

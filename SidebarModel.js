@@ -33,6 +33,23 @@ function stringOr(value, fallback) {
   return typeof value === "string" ? value : fallback
 }
 
+// Limits on what a workspace file may make the shell parse and draw. The
+// shell also hosts the lock screen and polkit, so a huge file must not stall
+// it: oversized files are rejected, long lists and strings are cut.
+var MAX_FILE_CHARS = 256 * 1024
+var MAX_BLOCKS = 50
+var MAX_ITEMS = 100
+var MAX_STRING = 2000
+var MAX_TEXT = 8000
+
+function cap(value, max) {
+  return value.length > max ? value.slice(0, max) + "…" : value
+}
+
+function cappedString(value, fallback) {
+  return typeof value === "string" ? cap(value, MAX_STRING) : fallback
+}
+
 function percentOr(value, fallback) {
   return isFiniteNumber(value) ? clamp(value, 0, 100) : fallback
 }
@@ -60,7 +77,7 @@ function validDate(value) {
 
 function normalizeProgress(raw) {
   if (!isPlainObject(raw)) return null
-  var progress = { label: stringOr(raw.label, ""), percent: percentOr(raw.percent, 0) }
+  var progress = { label: cappedString(raw.label, ""), percent: percentOr(raw.percent, 0) }
   if (validDate(raw.start)) progress.start = raw.start
   if (validDate(raw.deadline)) progress.deadline = raw.deadline
   return progress
@@ -76,7 +93,7 @@ function normalizeScroll(raw) {
 // Notice ids drive dismissal, so an item without one gets an id derived from
 // its block and position: stable as long as the file keeps its order.
 function normalizeNotices(raw, block) {
-  var items = Array.isArray(raw.items) ? raw.items : []
+  var items = Array.isArray(raw.items) ? raw.items.slice(0, MAX_ITEMS) : []
   block.items = []
   for (var i = 0; i < items.length; i++) {
     var item = items[i]
@@ -84,30 +101,30 @@ function normalizeNotices(raw, block) {
     var notice = {
       id: nonEmptyString(item.id) ? item.id : block.id + "-n" + i,
       level: NOTICE_LEVELS.indexOf(item.level) !== -1 ? item.level : "info",
-      text: item.text
+      text: cap(item.text, MAX_STRING)
     }
-    if (nonEmptyString(item.at)) notice.at = item.at
+    if (nonEmptyString(item.at)) notice.at = cap(item.at, 40)
     block.items.push(notice)
   }
 }
 
 function normalizeFocus(raw, block) {
-  block.now = stringOr(raw.now, "")
+  block.now = cappedString(raw.now, "")
   block.next = []
-  var next = Array.isArray(raw.next) ? raw.next : []
+  var next = Array.isArray(raw.next) ? raw.next.slice(0, MAX_ITEMS) : []
   for (var i = 0; i < next.length; i++) {
-    if (nonEmptyString(next[i])) block.next.push(next[i])
+    if (nonEmptyString(next[i])) block.next.push(cap(next[i], MAX_STRING))
   }
 }
 
 function normalizeMilestones(raw, block) {
-  var items = Array.isArray(raw.items) ? raw.items : []
+  var items = Array.isArray(raw.items) ? raw.items.slice(0, MAX_ITEMS) : []
   block.items = []
   for (var i = 0; i < items.length; i++) {
     var item = items[i]
     if (!isPlainObject(item) || !nonEmptyString(item.label)) continue
     var milestone = {
-      label: item.label,
+      label: cap(item.label, MAX_STRING),
       status: MILESTONE_STATUSES.indexOf(item.status) !== -1 ? item.status : "pending"
     }
     if (validDate(item.date)) milestone.date = item.date
@@ -120,7 +137,7 @@ function normalizeBlock(raw, index, usedIds) {
 
   // Ids are meant to be unique; a missing or repeated one falls back to
   // "b<index>" so scroll targets and notice ids never collide.
-  var id = nonEmptyString(raw.id) && !usedIds[raw.id] ? raw.id : "b" + index
+  var id = nonEmptyString(raw.id) && raw.id.length <= 200 && !usedIds[raw.id] ? raw.id : "b" + index
   while (usedIds[id]) id = id + "_"
   usedIds[id] = true
 
@@ -128,9 +145,9 @@ function normalizeBlock(raw, index, usedIds) {
   if (raw.type === "notices") normalizeNotices(raw, block)
   else if (raw.type === "focus") normalizeFocus(raw, block)
   else if (raw.type === "milestones") normalizeMilestones(raw, block)
-  else if (raw.type === "text") block.text = stringOr(raw.text, "")
+  else if (raw.type === "text") block.text = typeof raw.text === "string" ? cap(raw.text, MAX_TEXT) : ""
   else if (raw.type === "progress") {
-    block.label = stringOr(raw.label, "")
+    block.label = cappedString(raw.label, "")
     block.percent = percentOr(raw.percent, 0)
   }
   return block
@@ -141,8 +158,12 @@ function normalizeBlock(raw, index, usedIds) {
 // failure and a single bad block should not freeze it.
 function normalizeWorkspaceConfig(rawText) {
   var data
+  var source = String(rawText === undefined || rawText === null ? "" : rawText)
+  if (source.length > MAX_FILE_CHARS) {
+    return { ok: false, config: null, error: "Archivo demasiado grande (más de " + (MAX_FILE_CHARS / 1024) + " KB)" }
+  }
   try {
-    data = JSON.parse(String(rawText === undefined || rawText === null ? "" : rawText))
+    data = JSON.parse(source)
   } catch (e) {
     return { ok: false, config: null, error: "JSON inválido: " + e.message }
   }
@@ -155,7 +176,7 @@ function normalizeWorkspaceConfig(rawText) {
 
   var blocks = []
   var usedIds = {}
-  var rawBlocks = Array.isArray(data.blocks) ? data.blocks : []
+  var rawBlocks = Array.isArray(data.blocks) ? data.blocks.slice(0, MAX_BLOCKS) : []
   for (var i = 0; i < rawBlocks.length; i++) {
     var block = normalizeBlock(rawBlocks[i], i, usedIds)
     if (block) blocks.push(block)
@@ -165,7 +186,7 @@ function normalizeWorkspaceConfig(rawText) {
     ok: true,
     config: {
       version: 1,
-      project: stringOr(data.project, ""),
+      project: cappedString(data.project, ""),
       progress: normalizeProgress(data.progress),
       scroll: normalizeScroll(data.scroll),
       blocks: blocks
@@ -357,3 +378,39 @@ function setTitle(state, ws, title) {
 function serializeSidebarState(state) {
   return JSON.stringify(sanitizeSidebarState(state), null, 2) + "\n"
 }
+
+// ---- text blocks
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+}
+
+function inlineMarkdown(text) {
+  return text
+    .replace(/\[([^\]\n]+)\]\((https:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?![\w*])/g, "$1<i>$2</i>")
+    .replace(/(^|[^\w])_([^_\n]+)_(?!\w)/g, "$1<i>$2</i>")
+}
+
+// Renders the small Markdown subset of text blocks (bold, italic, `code`,
+// https links) as Qt StyledText. Everything is HTML-escaped first, so the only
+// tags in the result are the ones built here: no images, no raw HTML, no
+// links other than https. Text blocks never go through Text.MarkdownText,
+// which fetches images, including from local devices.
+function markdownToStyled(text) {
+  var source = typeof text === "string" ? cap(text, MAX_TEXT) : ""
+  var parts = escapeHtml(source).split("`")
+  var out = ""
+  for (var i = 0; i < parts.length; i++) {
+    // Odd parts sit between backticks; an unpaired trailing one stays literal.
+    if (i % 2 === 1 && i < parts.length - 1) out += "<tt>" + parts[i] + "</tt>"
+    else out += (i % 2 === 1 ? "`" : "") + inlineMarkdown(parts[i])
+  }
+  return out.replace(/\n/g, "<br>")
+}
+
+function isSafeLink(url) {
+  return typeof url === "string" && /^https:\/\/[^\s]+$/i.test(url)
+}
+

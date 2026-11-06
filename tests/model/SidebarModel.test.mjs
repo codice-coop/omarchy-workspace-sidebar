@@ -527,3 +527,39 @@ describe("sidebar state", () => {
     assert.deepEqual(JSON.parse(M.serializeSidebarState({ width: 50, extra: 1 })), { ...DEFAULTS, width: 180 })
   })
 })
+
+describe("security limits", () => {
+  test("markdownToStyled escapes HTML and only builds its own tags", () => {
+    assert.equal(M.markdownToStyled("<img src=x> & \"q\""), "&lt;img src=x&gt; &amp; &quot;q&quot;")
+    assert.equal(M.markdownToStyled("**b** *i* _j_ `c <x>`"), "<b>b</b> <i>i</i> <i>j</i> <tt>c &lt;x&gt;</tt>")
+    assert.equal(M.markdownToStyled("[ok](https://a.b/c)"), '<a href="https://a.b/c">ok</a>')
+    assert.equal(M.markdownToStyled("l1\nl2"), "l1<br>l2")
+  })
+
+  test("markdownToStyled never produces images or non-https links", () => {
+    for (const bad of ['![a](http://h/x.png "t")', "![a][r]\n[r]: http://h/x.png", "[f](file:///etc/passwd)",
+                       "[h](http://a.b)", '[x](https://a.b" onclick="y)']) {
+      const out = M.markdownToStyled(bad)
+      assert.ok(!/<img/i.test(out), out)
+      for (const m of out.matchAll(/href="([^"]*)"/g)) assert.ok(m[1].startsWith("https://"), out)
+      assert.ok(!/<a [^>]*onclick/i.test(out), out)
+    }
+  })
+
+  test("isSafeLink accepts only https", () => {
+    assert.equal(M.isSafeLink("https://a.b"), true)
+    for (const bad of ["http://a.b", "file:///etc", "slack://x", "javascript:x", "", null]) assert.equal(M.isSafeLink(bad), false)
+  })
+
+  test("oversized files are rejected and long content is capped", () => {
+    assert.equal(M.normalizeWorkspaceConfig(" ".repeat(300 * 1024)).ok, false)
+    const blocks = [{ id: "big", type: "text", text: "x".repeat(20000) },
+      { id: "n", type: "notices", items: Array.from({ length: 500 }, (_, i) => ({ id: "n" + i, text: "y" })) },
+      ...Array.from({ length: 80 }, (_, i) => ({ id: "t" + i, type: "text", text: "z" }))]
+    const r = M.normalizeWorkspaceConfig(JSON.stringify({ version: 1, blocks }))
+    assert.ok(r.ok)
+    assert.equal(r.config.blocks.length, 50)
+    assert.equal(r.config.blocks[0].text.length, 8001)
+    assert.equal(r.config.blocks[1].items.length, 100)
+  })
+})

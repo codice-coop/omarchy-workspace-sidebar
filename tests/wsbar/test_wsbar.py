@@ -812,5 +812,38 @@ class TestCli(WsbarTestCase):
       self.assertEqual(f.readline().strip(), "#!/usr/bin/env python3")
 
 
+class TestHardening(WsbarTestCase):
+  """Content arrives from sessions that read untrusted repo text."""
+
+  def test_markdown_rejects_images_html_and_non_https_links(self):
+    for bad in ("![i](http://x/y.png)", "<img src=x>", "</b>", "<!-- c -->",
+                "[x](file:///etc/passwd)", "[x](http://a.b)", "[r]: file:///etc"):
+      self.fails(2, "--ws", "3", "text", "n", bad)
+    self.assertFalse(os.path.exists(self.ws_file()))
+
+  def test_markdown_allows_https_links_and_comparisons(self):
+    self.ok("--ws", "3", "text", "n", "**ok** [x](https://a.b) a < b y 3>2")
+
+  def test_rejects_deep_nesting_without_traceback(self):
+    deep = "[" * 60000 + "]" * 60000
+    err = self.fails(2, "--ws", "3", "milestones", "set", deep)
+    self.assertNotIn("Traceback", err)
+    err = self.fails(2, "--ws", "3", "milestones", "set", "[" * 20 + "]" * 20)
+    self.assertIn("nests deeper", err)
+
+  def test_rejects_oversized_strings_and_lists(self):
+    self.fails(2, "--ws", "3", "notice", "add", "--level", "info", "x" * 5000)
+    many = json.dumps([{"label": "m%d" % i, "status": "pending"} for i in range(300)])
+    self.fails(2, "--ws", "3", "milestones", "set", many)
+
+  def test_created_files_follow_umask(self):
+    old = os.umask(0o077)
+    try:
+      self.ok("--ws", "3", "text", "n", "hola")
+    finally:
+      os.umask(old)
+    self.assertEqual(os.stat(self.ws_file()).st_mode & 0o777, 0o600)
+
+
 if __name__ == "__main__":
   unittest.main()

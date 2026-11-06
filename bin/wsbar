@@ -26,6 +26,21 @@ ITEM_STATUSES = ("done", "pending")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 HISTORY_LIMIT = 50
 
+# Bounds on what any document may hold. Content arrives through Claude
+# sessions that read untrusted repo text, and the sidebar parses every file in
+# the long-running shell, so size and shape are capped before anything is
+# written: nothing legitimate nests deeper than 6 levels.
+MAX_DEPTH = 6
+MAX_STRING = 4000
+MAX_LIST = 200
+MAX_BYTES = 256 * 1024
+
+# Markdown in text blocks is rendered by Qt: no images (remote fetches), no raw
+# HTML, and links only to https.
+MD_IMAGE_RE = re.compile(r"!\[")
+MD_HTML_RE = re.compile(r"<[A-Za-z!/?]")
+MD_LINK_TARGET_RE = re.compile(r"\]\(\s*<?([^)\s>]*)|^\s*\[[^\]]+\]:\s*<?(\S*?)>?\s*$", re.M)
+
 FOCUS_ID = "foco"
 MILESTONES_ID = "hitos"
 NOTICES_ID = "avisos"
@@ -180,6 +195,38 @@ def check_string(v, where, errors, allow_empty=False):
     errors.append("%s must be a non-empty string" % where)
 
 
+def check_bounds(value, where, errors, depth=1):
+  if depth > MAX_DEPTH:
+    errors.append("%s nests deeper than %d levels" % (where, MAX_DEPTH))
+    return
+  if isinstance(value, str):
+    if len(value) > MAX_STRING:
+      errors.append("%s is longer than %d characters" % (where, MAX_STRING))
+  elif isinstance(value, list):
+    if len(value) > MAX_LIST:
+      errors.append("%s has more than %d entries" % (where, MAX_LIST))
+    for i, v in enumerate(value[:MAX_LIST]):
+      check_bounds(v, "%s[%d]" % (where, i), errors, depth + 1)
+  elif isinstance(value, dict):
+    if len(value) > MAX_LIST:
+      errors.append("%s has more than %d keys" % (where, MAX_LIST))
+    for k, v in list(value.items())[:MAX_LIST]:
+      check_bounds(v, "%s.%s" % (where, k), errors, depth + 1)
+
+
+def check_markdown(text, where, errors):
+  if not isinstance(text, str):
+    return
+  if MD_IMAGE_RE.search(text):
+    errors.append("%s: images are not allowed" % where)
+  if MD_HTML_RE.search(text):
+    errors.append("%s: raw HTML is not allowed" % where)
+  for m in MD_LINK_TARGET_RE.finditer(text):
+    target = (m.group(1) or m.group(2) or "").strip()
+    if target and not target.lower().startswith("https://"):
+      errors.append("%s: only https:// links are allowed (%s)" % (where, target[:60]))
+
+
 def validate_block(b, where, errors):
   if not isinstance(b, dict):
     errors.append("%s must be an object" % where)
@@ -234,6 +281,7 @@ def validate_block(b, where, errors):
         check_date(m["date"], w + ".date", errors)
   elif t == "text":
     check_string(b.get("text"), where + ".text", errors, allow_empty=True)
+    check_markdown(b.get("text"), where + ".text", errors)
   elif t == "progress":
     if "label" in b:
       check_string(b["label"], where + ".label", errors, allow_empty=True)
@@ -244,6 +292,9 @@ def validate_doc(doc):
   errors = []
   if not isinstance(doc, dict):
     return ["document must be a JSON object"]
+  check_bounds(doc, "document", errors)
+  if errors:
+    return errors
   # type() rather than ==: Python takes true as 1, the sidebar does not.
   if type(doc.get("version")) is not int or doc["version"] != VERSION:
     errors.append("version must be %d" % VERSION)
@@ -287,6 +338,9 @@ def validate_plan(plan):
   errors = []
   if not isinstance(plan, dict):
     return ["plan must be a JSON object"]
+  check_bounds(plan, "plan", errors)
+  if errors:
+    return errors
   check_string(plan.get("label"), "label", errors)
   if "root" in plan and not isinstance(plan["root"], str):
     errors.append("root must be a string")
@@ -348,7 +402,7 @@ def read_json(path):
       return json.load(f, **STRICT_JSON)
   except FileNotFoundError:
     return None
-  except ValueError as e:
+  except (ValueError, RecursionError) as e:
     raise WsbarError("%s is not valid JSON (%s); fix or remove it" % (path, e))
 
 
@@ -359,13 +413,17 @@ def atomic_write(path, data):
     text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
   except ValueError as e:
     raise WsbarError("%s: refusing to write a non-finite number (%s)" % (path, e))
+  if len(text.encode("utf-8")) > MAX_BYTES:
+    raise WsbarError("%s: refusing to write more than %d KB" % (path, MAX_BYTES // 1024))
   fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".tmp", dir=directory)
   try:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
       f.write(text)
       f.flush()
       os.fsync(f.fileno())
-    os.chmod(tmp, 0o644)
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(tmp, 0o666 & ~umask)
     os.replace(tmp, path)
   except BaseException:
     try:
@@ -401,7 +459,7 @@ def save_doc(ws, doc):
 def parse_json_arg(text, what):
   try:
     return json.loads(text, **STRICT_JSON)
-  except ValueError as e:
+  except (ValueError, RecursionError) as e:
     raise WsbarError("%s is not valid JSON: %s" % (what, e))
 
 
@@ -751,6 +809,8 @@ def cmd_plan_set(args):
   if errors:
     fail_invalid("plan", errors)
   plan["root"] = root
+  # History is wsbar's own record; a caller cannot supply or rewrite it.
+  plan.pop("history", None)
   try:
     old = read_json(plan_path(root))
   except WsbarError:
@@ -761,8 +821,7 @@ def cmd_plan_set(args):
   for it in plan["items"]:
     it.setdefault("weight", 1)
     it.setdefault("status", old_status.get(it["id"], "pending"))
-  if "history" not in plan:
-    plan["history"] = list(old.get("history", [])) if old else []
+  plan["history"] = list(old.get("history", [])) if old else []
   add_history(plan, None, "set")
   save_plan(root, plan)
   print(plan_path(root))

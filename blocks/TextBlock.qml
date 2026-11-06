@@ -1,8 +1,14 @@
 import QtQuick
 import qs.Commons
 import qs.Commons as Commons
+import qs.Ui
+import "../SidebarModel.js" as SidebarModel
 
-// Free-form note in basic Markdown (bold, italic, code, links).
+// Free-form note in basic Markdown (bold, italic, code, https links).
+// The text comes from files that untrusted repo content can influence, so it
+// is never handed to Text.MarkdownText (which fetches images, even from local
+// devices): SidebarModel.markdownToStyled escapes it and builds a StyledText
+// subset, and only https links are opened.
 Item {
   id: root
 
@@ -11,29 +17,31 @@ Item {
   readonly property string source: block ? String(block.text || "") : ""
   readonly property bool hasContent: source.trim() !== ""
 
-  // MarkdownText paints links in the platform's link blue and ignores
-  // linkColor, but it does pass inline HTML through: wrap each [label](url)
-  // in an anchor whose span carries the theme accent.
-  readonly property string rendered: source.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(match, label, url) {
-    return "<a href=\"" + url.replace(/"/g, "%22") + "\"><span style=\"color:" + String(Commons.Color.accent) + "\">"
-      + label + "</span></a>"
-  })
-
   implicitHeight: body.implicitHeight
 
   Text {
     id: body
     width: parent.width
-    textFormat: Text.MarkdownText
-    text: root.rendered
+    textFormat: Text.StyledText
+    text: SidebarModel.markdownToStyled(root.source)
     wrapMode: Text.Wrap
     color: Commons.Color.foreground
+    linkColor: Commons.Color.accent
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
-    onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+    onLinkActivated: function(link) {
+      if (SidebarModel.isSafeLink(link)) Qt.openUrlExternally(link)
+    }
 
     HoverHandler {
+      id: hover
       cursorShape: body.hoveredLink !== "" ? Qt.PointingHandCursor : Qt.ArrowCursor
     }
+  }
+
+  // The label of a link is free text: show where it really goes.
+  PanelToolTip {
+    visible: hover.hovered && body.hoveredLink !== ""
+    text: body.hoveredLink
   }
 }
