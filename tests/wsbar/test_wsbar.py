@@ -181,7 +181,7 @@ class TestWorkspaceTarget(WsbarTestCase):
     self.fails(1, "where")
 
   def test_out_of_range(self):
-    self.fails(2, "--ws", "11", "where")
+    self.fails(2, "--ws", "991", "where")
     self.fails(2, "--ws", "0", "where")
     self.fails(2, "--ws", "x", "where")
     self.fails(2, "where", WSBAR_WS="-1")

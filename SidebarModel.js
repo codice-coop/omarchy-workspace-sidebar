@@ -274,19 +274,99 @@ function resolveScroll(scroll, blockOffsets, contentHeight, viewHeight) {
 
 // ---- Workspace list (same rule as the omarchy.workspaces bar widget)
 
-function workspaceIds(existingIds) {
-  var ids = [1, 2, 3, 4, 5]
+// Every monitor has workspaces 1-10 of its own, which Hyprland numbers in a
+// block of ten per monitor: 1-10, 11-20, and so on (Omarchy's
+// default/hypr/monitor-workspaces.lua). Titles, files and session links are
+// keyed by the Hyprland id; the row shows the number within the monitor.
+var SLOTS = 10
+var MAX_WS = 990
+var MONITOR_NAME_RE = /^[A-Za-z0-9_.-]+$/
+
+function isWorkspaceId(id) {
+  return typeof id === "number" && id === Math.floor(id) && id >= 1 && id <= MAX_WS
+}
+
+function blockOf(id) {
+  return Math.floor((id - 1) / SLOTS)
+}
+
+function slotOf(id) {
+  return (id - 1) % SLOTS + 1
+}
+
+function blockIds(block) {
+  var ids = []
+  for (var slot = 1; slot <= SLOTS; slot++) ids.push(block * SLOTS + slot)
+  return ids
+}
+
+// The monitor's block from Omarchy's state file: one line per monitor ever
+// seen, "<block>\t<connector>\t<identity>", the connector empty while unplugged.
+function parseMonitorBlocks(text) {
+  var blocks = {}
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var fields = lines[i].split("\t")
+    if (fields.length < 3 || fields[1] === "" || !/^\d{1,2}$/.test(fields[0])) continue
+    blocks[fields[1]] = parseInt(fields[0], 10)
+  }
+  return blocks
+}
+
+// Until Hyprland has written the file (or on an Omarchy from before per-monitor
+// workspaces) the workspace a monitor shows is in its own block.
+function monitorBlock(blocks, monitorName, activeId) {
+  if (isPlainObject(blocks) && Object.prototype.hasOwnProperty.call(blocks, monitorName)) return blocks[monitorName]
+  return isWorkspaceId(activeId) ? blockOf(activeId) : 0
+}
+
+// The same as the bar: the first five of the monitor's block plus any of the
+// rest that exist.
+function ownWorkspaceIds(block, existingIds) {
+  var own = blockIds(block)
+  var ids = own.slice(0, 5)
   var existing = Array.isArray(existingIds) ? existingIds : []
   for (var i = 0; i < existing.length; i++) {
     var id = Number(existing[i])
-    if (id === Math.floor(id) && id > 0 && id <= 10 && ids.indexOf(id) === -1) ids.push(id)
+    if (own.indexOf(id) !== -1 && ids.indexOf(id) === -1) ids.push(id)
   }
   ids.sort(function(left, right) { return left - right })
   return ids
 }
 
+// Workspaces of another block sitting on this monitor, listed after its own.
+// `workspaces` is [{ id, monitor }].
+function guestWorkspaceIds(block, monitorName, workspaces) {
+  var guests = []
+  var list = Array.isArray(workspaces) ? workspaces : []
+  for (var i = 0; i < list.length; i++) {
+    var id = isPlainObject(list[i]) ? list[i].id : null
+    if (isWorkspaceId(id) && blockOf(id) !== block && list[i].monitor === monitorName && guests.indexOf(id) === -1) guests.push(id)
+  }
+  guests.sort(function(left, right) { return left - right })
+  return guests
+}
+
+// The Lua expression that focuses a workspace, spliced into `hyprctl dispatch`:
+// only an integer id and a plain monitor name get in. "" for anything else.
+function focusExpression(id, block, monitorName, perMonitor) {
+  if (!isWorkspaceId(id)) return ""
+  if (perMonitor && blockOf(id) === block && typeof monitorName === "string" && MONITOR_NAME_RE.test(monitorName))
+    return "o.workspaces.focus(" + slotOf(id) + ", \"" + monitorName + "\")"
+  return "hl.dsp.focus({ workspace = \"" + id + "\" })"
+}
+
+// Payload of Hyprland's changeworkspaceid event: "<old>,<new>". Null if malformed.
+function parseRenumber(data) {
+  var match = /^(\d{1,3}),(\d{1,3})$/.exec(String(data))
+  if (!match) return null
+  var from = parseInt(match[1], 10)
+  var to = parseInt(match[2], 10)
+  return isWorkspaceId(from) && isWorkspaceId(to) && from !== to ? { from: from, to: to } : null
+}
+
 function defaultTitle(n) {
-  return "Workspace " + n
+  return "Workspace " + slotOf(Number(n))
 }
 
 function titleFor(state, n) {
@@ -401,6 +481,21 @@ function dismiss(state, ws, noticeId, currentIds) {
   return next
 }
 
+// A workspace changed number: its title and dismissed notices go with it. Swaps
+// with whatever the new number held, so nothing is lost.
+function renumberState(state, from, to) {
+  var next = sanitizeSidebarState(state)
+  ;[next.titles, next.dismissed].forEach(function(map) {
+    var a = map[String(from)]
+    var b = map[String(to)]
+    delete map[String(from)]
+    delete map[String(to)]
+    if (a !== undefined) map[String(to)] = a
+    if (b !== undefined) map[String(from)] = b
+  })
+  return next
+}
+
 function setTitle(state, ws, title) {
   var next = sanitizeSidebarState(state)
   var trimmed = typeof title === "string" ? title.trim() : ""
@@ -442,7 +537,7 @@ function normalizeSessions(rawText) {
   // A session lives in one workspace; a file that lists it twice keeps the
   // lowest-numbered one, so the indicator never shows up in two rows.
   var seen = {}
-  for (var n = 1; n <= 10; n++) {
+  for (var n = 1; n <= MAX_WS; n++) {
     var key = String(n)
     if (!Object.prototype.hasOwnProperty.call(data.workspaces, key)) continue
     var raw = data.workspaces[key]

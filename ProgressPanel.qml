@@ -5,7 +5,7 @@ import qs.Ui
 import "SidebarModel.js" as SidebarModel
 import "blocks"
 
-// Panel 2: the focused workspace's workspaceN.json. The progress strip stays
+// Panel 2: the workspaceN.json of the workspace its monitor shows. The progress strip stays
 // fixed on the left; blocks scroll beside it in file order. Each load of the
 // file re-applies its `scroll`; manual scrolling holds until the next one.
 Item {

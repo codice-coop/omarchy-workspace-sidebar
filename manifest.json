@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.codice-coop.workspace-sidebar",
   "name": "Workspace sidebar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Matías Verges · CODICE",
   "description": "Left sidebar with the workspace list and a live progress panel per workspace, kept up to date by Claude Code sessions you connect.",
   "kinds": [

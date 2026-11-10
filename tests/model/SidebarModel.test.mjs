@@ -387,24 +387,83 @@ describe("resolveScroll", () => {
   })
 })
 
-describe("workspaceIds", () => {
-  test("always 1..5", () => {
-    assert.deepEqual(M.workspaceIds([]), [1, 2, 3, 4, 5])
-    assert.deepEqual(M.workspaceIds(undefined), [1, 2, 3, 4, 5])
+describe("per-monitor workspaces", () => {
+  test("block and slot", () => {
+    for (const [id, block, slot] of [[1, 0, 1], [10, 0, 10], [11, 1, 1], [16, 1, 6], [20, 1, 10], [21, 2, 1]]) {
+      assert.equal(M.blockOf(id), block, String(id))
+      assert.equal(M.slotOf(id), slot, String(id))
+    }
+    assert.deepEqual(M.blockIds(1), [11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
   })
 
-  test("adds existing ids up to 10, sorted, no duplicates", () => {
-    assert.deepEqual(M.workspaceIds([9, 2, 7, 7, 10]), [1, 2, 3, 4, 5, 7, 9, 10])
+  test("own ids: first five of the block plus any existing, sorted", () => {
+    assert.deepEqual(M.ownWorkspaceIds(0, []), [1, 2, 3, 4, 5])
+    assert.deepEqual(M.ownWorkspaceIds(0, undefined), [1, 2, 3, 4, 5])
+    assert.deepEqual(M.ownWorkspaceIds(1, [19, 12, 17, 17, 20]), [11, 12, 13, 14, 15, 17, 19, 20])
   })
 
-  test("ignores special, out of range and non-integer ids", () => {
-    assert.deepEqual(M.workspaceIds([-98, 0, 11, 6.5, "x", null, 8]), [1, 2, 3, 4, 5, 8])
+  test("own ids ignore other blocks, special and non-integer ids", () => {
+    assert.deepEqual(M.ownWorkspaceIds(0, [-98, 0, 11, 6.5, "x", null, 8]), [1, 2, 3, 4, 5, 8])
+    assert.deepEqual(M.ownWorkspaceIds(1, [1, 16, 21]), [11, 12, 13, 14, 15, 16])
+  })
+
+  test("guests: another block's workspaces on this monitor only", () => {
+    const list = [
+      { id: 1, monitor: "DP-1" }, { id: 5, monitor: "HDMI-A-1" }, { id: 16, monitor: "DP-1" },
+      { id: 23, monitor: "DP-1" }, { id: -98, monitor: "DP-1" }, { id: 1, monitor: "DP-1" },
+    ]
+    assert.deepEqual(M.guestWorkspaceIds(1, "DP-1", list), [1, 23])
+    assert.deepEqual(M.guestWorkspaceIds(0, "HDMI-A-1", list), [])
+    assert.deepEqual(M.guestWorkspaceIds(1, "DP-1", null), [])
+  })
+
+  test("parseMonitorBlocks reads connected monitors and skips the rest", () => {
+    const text = "0\tHDMI-A-1\tViewSonic X\n1\tDP-1\tDell #A\n2\t\tUnplugged\nbroken\nx\tDP-2\tY\n"
+    assert.deepEqual(M.parseMonitorBlocks(text), { "HDMI-A-1": 0, "DP-1": 1 })
+    assert.deepEqual(M.parseMonitorBlocks(""), {})
+    assert.deepEqual(M.parseMonitorBlocks(undefined), {})
+  })
+
+  test("monitorBlock prefers the file, else the active workspace", () => {
+    assert.equal(M.monitorBlock({ "DP-1": 1 }, "DP-1", 3), 1)
+    assert.equal(M.monitorBlock({}, "DP-1", 16), 1)
+    assert.equal(M.monitorBlock({}, "DP-1", 0), 0)
+    assert.equal(M.monitorBlock({}, "__proto__", 4), 0)
+  })
+
+  test("focusExpression: own block through o.workspaces, guests by id", () => {
+    assert.equal(M.focusExpression(16, 1, "DP-1", true), 'o.workspaces.focus(6, "DP-1")')
+    assert.equal(M.focusExpression(20, 1, "DP-1", true), 'o.workspaces.focus(10, "DP-1")')
+    assert.equal(M.focusExpression(1, 1, "DP-1", true), 'hl.dsp.focus({ workspace = "1" })')
+    assert.equal(M.focusExpression(3, 0, "DP-1", false), 'hl.dsp.focus({ workspace = "3" })')
+  })
+
+  test("focusExpression lets nothing but an id and a plain monitor name through", () => {
+    for (const bad of [0, -1, 991, 1.5, NaN, "3", null, '1" }) os.execute("x'])
+      assert.equal(M.focusExpression(bad, 0, "DP-1", true), "", String(bad))
+    assert.equal(M.focusExpression(3, 0, 'DP-1") os.execute("x', true), 'hl.dsp.focus({ workspace = "3" })')
+  })
+
+  test("parseRenumber takes only old,new ids", () => {
+    assert.deepEqual(M.parseRenumber("1,11"), { from: 1, to: 11 })
+    for (const bad of ["", "1", "1,1", "1,991", "a,b", "1,2,3", "-1,2", undefined])
+      assert.equal(M.parseRenumber(bad), null, String(bad))
+  })
+
+  test("renumberState moves title and dismissed, swapping what the target held", () => {
+    const state = { version: 1, titles: { 1: "Genius", 11: "Viejo", 5: "Chat" }, dismissed: { 1: ["a"] } }
+    const next = M.renumberState(state, 1, 11)
+    assert.deepEqual(next.titles, { 11: "Genius", 1: "Viejo", 5: "Chat" })
+    assert.deepEqual(next.dismissed, { 11: ["a"] })
+    assert.deepEqual(state.titles[1], "Genius")
   })
 })
 
 describe("titles", () => {
   test("defaultTitle", () => {
     assert.equal(M.defaultTitle(3), "Workspace 3")
+    assert.equal(M.defaultTitle(16), "Workspace 6")
+    assert.equal(M.defaultTitle(20), "Workspace 10")
   })
 
   test("titleFor uses override or default", () => {
@@ -615,10 +674,10 @@ describe("normalizeSessions", () => {
     }
   })
 
-  test("only workspace keys 1..10 are kept", () => {
+  test("only workspace keys 1..990 are kept", () => {
     const ws = {}
-    for (const key of ["0", "1", "10", "11", "-1", "05", "1.0", "x", "__proto__"]) ws[key] = { ...LINK, session: "s" + key.replace(/\W/g, "") }
-    assert.deepEqual(Object.keys(M.normalizeSessions(file(ws))).sort(), ["1", "10"])
+    for (const key of ["0", "1", "10", "16", "990", "991", "-1", "05", "1.0", "x", "__proto__"]) ws[key] = { ...LINK, session: "s" + key.replace(/\W/g, "") }
+    assert.deepEqual(Object.keys(M.normalizeSessions(file(ws))).sort(), ["1", "10", "16", "990"])
   })
 
   test("session ids must match the id rule", () => {

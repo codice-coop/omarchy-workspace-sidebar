@@ -23,6 +23,7 @@ Item {
   id: root
 
   property string dataDir: Quickshell.env("HOME") + "/.config/workspaces/sidebar"
+  readonly property string wsbarPath: String(Qt.resolvedUrl("bin/wsbar")).replace(/^file:\/\//, "")
 
   // Nothing renders until the directory exists and _sidebar.json was read,
   // so a hidden sidebar never flashes on at startup.
@@ -58,8 +59,23 @@ Item {
 
   property string today: Qt.formatDate(new Date(), "yyyy-MM-dd")
 
-  readonly property int focusedWs: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
-  readonly property var workspaceFile: focusedWs >= 1 && focusedWs <= 10 ? fileFor(focusedWs) : null
+  // The sidebar is a view of the monitor it lives on: that monitor's workspaces,
+  // and the progress of the one it is showing, wherever the focus is.
+  readonly property var monitor: targetScreen ? Hyprland.monitorFor(targetScreen) : Hyprland.focusedMonitor
+  readonly property string monitorName: monitor ? monitor.name : ""
+  readonly property int activeWs: monitor && monitor.activeWorkspace ? monitor.activeWorkspace.id : 0
+  // Connector -> block, from the file Hyprland keeps them in; {} on an Omarchy
+  // from before per-monitor workspaces.
+  property var monitorBlocks: ({})
+  readonly property int block: SidebarModel.monitorBlock(monitorBlocks, monitorName, activeWs)
+  readonly property var guestIds: {
+    var values = Hyprland.workspaces.values
+    var list = []
+    for (var i = 0; i < values.length; i++)
+      list.push({ id: values[i].id, monitor: values[i].monitor ? values[i].monitor.name : "" })
+    return SidebarModel.guestWorkspaceIds(block, monitorName, list)
+  }
+  readonly property var workspaceFile: SidebarModel.isWorkspaceId(activeWs) ? fileFor(activeWs) : null
 
   function fileFor(ws) {
     var files = workspaceFiles.instances
@@ -157,10 +173,38 @@ Item {
   }
 
   function focusWorkspace(ws) {
-    // The id is spliced into a Lua dispatch string: only a plain 1..10 integer.
-    ws = Number(ws)
-    if (!Number.isInteger(ws) || ws < 1 || ws > 10) return
-    Util.execDetached("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ workspace = \"" + ws + "\" })"))
+    var perMonitor = Object.keys(monitorBlocks).length > 0
+    var expression = SidebarModel.focusExpression(Number(ws), block, monitorName, perMonitor)
+    if (expression) Util.execDetached("hyprctl dispatch " + Util.shellQuote(expression))
+  }
+
+  // Hyprland renumbers a workspace when it changes monitor or its monitor is
+  // unplugged. Title and dismissed notices live here; `wsbar rekey` moves its
+  // file and session link. Queued: one reconcile renumbers several in a row.
+  // The title moves once wsbar has, so if it fails they all stay together.
+  property var pendingRenumbers: []
+  property var currentRenumber: null
+
+  function renumber(from, to) {
+    if (editingWs === from || editingWs === to) cancelEdit()
+    pendingRenumbers = pendingRenumbers.concat([[from, to]])
+    runNextRenumber()
+  }
+
+  function runNextRenumber() {
+    if (rekeyProcess.running || currentRenumber !== null || pendingRenumbers.length === 0) return
+    currentRenumber = pendingRenumbers[0]
+    pendingRenumbers = pendingRenumbers.slice(1)
+    rekeyProcess.command = [root.wsbarPath, "rekey", String(currentRenumber[0]), String(currentRenumber[1])]
+    rekeyProcess.running = true
+  }
+
+  function finishRenumber(exitCode) {
+    var done = currentRenumber
+    currentRenumber = null
+    if (done !== null && exitCode === 0)
+      whenLoaded(function() { saveState(SidebarModel.renumberState(uiState, done[0], done[1])) })
+    Qt.callLater(runNextRenumber)
   }
 
   // ---------------------------------------------------------------- IPC
@@ -212,9 +256,47 @@ Item {
     onLoadFailed: root.sessions = ({})
   }
 
+  FileView {
+    path: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/monitor-workspaces"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.monitorBlocks = SidebarModel.parseMonitorBlocks(text())
+    onLoadFailed: root.monitorBlocks = ({})
+  }
+
+  // A shell restarted from inside Claude Code inherits its session id, and
+  // wsbar refuses rekey for a session.
+  Process {
+    id: rekeyProcess
+    environment: ({ CLAUDE_CODE_SESSION_ID: null })
+    stderr: StdioCollector {
+      onStreamFinished: if (text.trim() !== "") console.warn("workspace-sidebar:", text.trim())
+    }
+    onExited: function(exitCode) { root.finishRenumber(exitCode) }
+  }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      var name = event ? String(event.name) : ""
+      if (name === "changeworkspaceid") {
+        var change = SidebarModel.parseRenumber(event.data)
+        if (change) root.renumber(change.from, change.to)
+      }
+      // Hyprland's events don't say which monitor switched, and a workspace
+      // that changes number or monitor is only learned by asking.
+      var switched = name === "workspacev2" && root.monitor !== null && root.monitor.focused
+      if (switched || name === "moveworkspacev2" || name === "changeworkspaceid") {
+        Hyprland.refreshMonitors()
+        Hyprland.refreshWorkspaces()
+      }
+    }
+  }
+
   Variants {
     id: workspaceFiles
-    model: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    model: SidebarModel.blockIds(root.block).concat(root.guestIds)
 
     WorkspaceFile {
       required property var modelData
@@ -229,6 +311,8 @@ Item {
   }
 
   onUiStateChanged: refreshFallback()
+  // Guest rows are rebuilt with the list, which would strand an open edit.
+  onGuestIdsChanged: if (editingWs !== 0 && SidebarModel.blockOf(editingWs) !== block) cancelEdit()
 
   Timer {
     interval: 60 * 1000
@@ -299,9 +383,9 @@ Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
         sidebar: root
-        ws: root.focusedWs
+        ws: root.activeWs
         file: root.workspaceFile
-        dismissed: root.dismissedFor(root.focusedWs)
+        dismissed: root.dismissedFor(root.activeWs)
         today: root.today
       }
     }

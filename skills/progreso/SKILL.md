@@ -14,7 +14,7 @@ description: >
 
 # progreso
 
-El panel 2 de la sidebar muestra `~/.config/workspaces/sidebar/workspaceN.json` del workspace con foco.
+El panel 2 de la sidebar muestra `~/.config/workspaces/sidebar/workspaceN.json` del workspace visible en el monitor de la sidebar.
 Escribilo **sólo** con `wsbar`: valida y escribe atómico. Nunca edites ese archivo ni los planes de
 `~/.local/share/wsbar/projects/` a mano. Si dudás de un flag, `wsbar <comando> --help`.
 
@@ -35,13 +35,19 @@ Las únicas fuentes son el repo y su `gh`. **Nunca** uses Notion ni nada fuera d
 
 Las sesiones de Claude Code están **desconectadas por defecto**: mientras esta sesión no esté conectada,
 `wsbar` rechaza toda escritura (sale con 1 y "no está conectada a ningún workspace"). Sólo la persona
-decide conectar. **Nunca conectes por iniciativa propia**, ni siquiera para destrabar una escritura.
+decide conectar: que **ella escriba `/progreso`** en esta sesión ya es esa decisión. **Nunca conectes por
+iniciativa propia**: si la skill se activó sin que la persona la pidiera (al terminar un ítem, para dejar
+un aviso), no conectes, ni siquiera para destrabar una escritura.
 
+- **"/progreso"** solo (o con otro pedido: dimensionar, avanzar) → primero `wsbar status`. Si esta sesión
+  ya está conectada, seguí. Si no, mirá en la tabla el workspace de `wsbar where`: si está libre,
+  `wsbar connect` y contalo en una línea; si lo tiene **otra** sesión, no la desplaces: preguntale a la
+  persona si conectás esta en su lugar (si dice que sí, `wsbar connect`). Después seguí con el pedido.
 - **"/progreso conectar"** (o "conectá esta sesión") → `wsbar connect`. Contale en una línea lo que
   imprimió: "conectado al workspace N", y si agregó "reemplazó la sesión <id>" (había otra sesión en
   ese workspace y quedó desconectada) o "movida desde el workspace M", decilo también. Si falla porque no
-  detecta el workspace (típico dentro de tmux), preguntale en qué workspace está y corré
-  `wsbar connect --ws N` con ese número.
+  detecta el workspace (típico dentro de tmux), preguntale en qué monitor y workspace está y corré
+  `wsbar connect --ws MONITOR:N` (p. ej. `--ws DP-1:6`).
 - **"/progreso desconectar"** (o "desconectá") → `wsbar disconnect`, sin `--ws`: desconecta esta sesión;
   contale lo que imprimió. Si pide desconectar **otro** workspace, no lo hagas desde acá (`wsbar` lo
   rechaza): decile que corra `wsbar disconnect --ws N` en una terminal.
@@ -71,7 +77,10 @@ Con la sesión conectada, todos los comandos apuntan al workspace conectado (tam
 
 Desde una terminal común (sin `CLAUDE_CODE_SESSION_ID`), `wsbar` detecta el workspace subiendo por los
 procesos ancestros hasta la ventana de la terminal (no sigue el foco); si no lo detecta (tmux u otro
-multiplexor), pasá `--ws N`.
+multiplexor), pasá `--ws MONITOR:N`.
+
+Cada monitor tiene sus workspaces 1–10 y Hyprland los numera en bloques de diez: el 6 del segundo monitor
+es el id 16. `wsbar` trabaja con ese id y `wsbar connect` muestra ambos.
 
 El plan es por proyecto (toplevel git del cwd); si trabajás fuera del repo, agregá `--project PATH` a
 `plan …` y `publish`.

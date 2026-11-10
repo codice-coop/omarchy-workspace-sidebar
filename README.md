@@ -20,8 +20,11 @@ workspace's agent session can keep its own progress panel up to date and leave y
   - blocks: **notices** (dismissable), **focus** (now / next), **milestones**, Markdown **notes**, and
     secondary **meters**.
 - **Live updates** — each workspace's content is a JSON file that the panel watches.
-- **Monitor selector** at the top, show/hide via IPC or a keybinding, resizable by dragging the right
-  edge. Position, width and visibility persist.
+- **Per monitor** — like the bar, the sidebar shows the workspaces of the monitor it lives on, numbered
+  1–10, and the panel follows the workspace that monitor is showing. The **monitor selector** at the top
+  moves it.
+- Show/hide via IPC or a keybinding, resizable by dragging the right edge. Position, width and visibility
+  persist.
 - **Theme-aware** — colors, fonts and spacing come from the active Omarchy theme.
 - **Optional Claude Code integration** — a skill and hooks let a session size the project, mark
   progress, and post "waiting for you" notices, only for sessions you explicitly connect.
@@ -80,6 +83,10 @@ ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/bin/wsba
 Each workspace reads `~/.config/workspaces/sidebar/workspaceN.json`. Write it with `wsbar`, which
 validates every change and writes atomically, so the panel never sees a half-written file. By default it
 targets the workspace of the terminal it runs in.
+
+`N` is the Hyprland id. Omarchy gives each monitor a block of ten, so workspace 6 of the second monitor is
+id 16; `wsbar` also accepts `--ws DP-1:6`. When Hyprland renumbers a workspace (moved to another monitor,
+or its monitor unplugged), its title, file and connected session follow it.
 
 ```bash
 wsbar where                                            # workspace of this terminal
@@ -143,10 +150,11 @@ ln -s ~/.config/omarchy/plugins/io.github.codice-coop.workspace-sidebar/hooks/cl
 **3. Connect a session.** Sessions start **disconnected**: a session that is not connected cannot write to
 any panel, and the hooks do nothing for it. In the session you want on a workspace:
 
-- `/progreso conectar` — connects it to the workspace of its terminal (one session per workspace;
-  connecting another replaces the previous one and says so). The row shows a small indicator.
-- `/progreso` — Claude reads the repo (docs, plans, git log, open PRs), proposes a goal, weighted items,
-  milestones and focus, asks for the deadline if it is not written down, and publishes it.
+- `/progreso` — connects the session to the workspace of its terminal if it isn't connected yet (if another
+  session holds that workspace, it asks first). Then Claude reads the repo (docs, plans, git log, open PRs),
+  proposes a goal, weighted items, milestones and focus, asks for the deadline if it is not written down,
+  and publishes it. The row shows a small indicator. Claude never connects a session you didn't run this in.
+- `/progreso conectar` — only connects, and replaces the session holding that workspace, saying so.
 - From then on it marks items done, updates the focus, and leaves notices; the hooks republish the plan at
   session start and post a "Claude is waiting for you" notice that clears when you reply.
 - `/progreso desconectar` and `/progreso estado` to disconnect or check.
@@ -182,7 +190,7 @@ the plugin is written defensively:
 - **Minimal IPC.** The plugin's own IPC methods are only `toggle`, `show`, `hide` and `moveTo`; its
   internals live in a child object the shell's IPC cannot reach.
 - **No interpolation of content.** Processes run with argument lists; the one Hyprland dispatch string
-  accepts only an integer workspace 1–10.
+  accepts only an integer workspace id and a monitor name of letters, digits, `_`, `.` and `-`.
 - **Agent control, not a sandbox.** Through `wsbar`, a Claude Code session can write only to the workspace
   you connected it to. This prevents mistakes and cross-talk between sessions; it does not confine an
   agent that has shell access, which could still edit the files directly.
@@ -192,7 +200,7 @@ the plugin is written defensively:
 ## Development
 
 ```bash
-node --test tests/model/                        # sidebar logic (SidebarModel.js)
+node --test tests/model/*.test.mjs              # sidebar logic (SidebarModel.js)
 python3 -m unittest discover -s tests/wsbar     # wsbar and hooks
 omarchy plugin validate .
 omarchy restart shell                           # the plugin is keepLoaded: QML changes apply on restart

@@ -170,7 +170,7 @@ class TestConnect(SessionsTestCase):
 
   def test_invalid_links_file_is_not_overwritten(self):
     os.makedirs(self.config)
-    for bad in ('{"version": 1, "workspaces": {"11": {}}}', "{oops",
+    for bad in ('{"version": 1, "workspaces": {"991": {}}}', "{oops",
                 json.dumps({"version": 1, "workspaces": {
                   "1": {"session": SID, "project": "", "since": "2026-11-06T10:00", "active": True},
                   "2": {"session": SID, "project": "", "since": "2026-11-06T10:00", "active": True}}})):
@@ -228,6 +228,87 @@ class TestConnect(SessionsTestCase):
     self.assertIn(SID2[:8], out)
     self.assertRegex(out, r"(?m)^9\s+%s\s+activa" % SID2[:8])
     self.assertIn("no conectada", self.ok("status", "--session", "otra"))
+
+
+class TestPerMonitorWorkspaces(SessionsTestCase):
+  def blocks_file(self, content="0\tHDMI-A-1\tViewSonic\n1\tDP-1\tDell\n2\t\tGone\n"):
+    base = os.path.join(self.tmp, "xdg-state")
+    os.makedirs(os.path.join(base, "omarchy"), exist_ok=True)
+    with open(os.path.join(base, "omarchy", "monitor-workspaces"), "w") as f:
+      f.write(content)
+    return base
+
+  def test_ids_of_any_block_are_valid(self):
+    self.assertEqual(self.ok("--ws", "16", "where").strip(), "16")
+    self.fails(2, "--ws", "0", "where")
+    self.fails(2, "--ws", "991", "where")
+
+  def test_autodetects_a_workspace_of_another_block(self):
+    self.set_clients([{"pid": os.getpid(), "workspace": {"id": 16}}])
+    self.assertEqual(self.ok("where").strip(), "16")
+
+  def test_monitor_and_number(self):
+    base = self.blocks_file()
+    self.assertEqual(self.ok("--ws", "DP-1:6", "where", XDG_STATE_HOME=base).strip(), "16")
+    self.assertEqual(self.ok("--ws", "HDMI-A-1:10", "where", XDG_STATE_HOME=base).strip(), "10")
+    self.fails(2, "--ws", "DP-1:11", "where", XDG_STATE_HOME=base)
+    self.fails(2, "--ws", "DP-9:1", "where", XDG_STATE_HOME=base)
+
+  def test_connect_says_where_the_person_sees_it(self):
+    base = self.blocks_file()
+    out = self.ok("connect", "--session", SID, "--ws", "16", cwd=self.repo, XDG_STATE_HOME=base)
+    self.assertIn("conectado al workspace 16 (6 en DP-1)", out)
+
+  def test_rekey_moves_file_and_link(self):
+    self.ok("--ws", "1", "progress", "--label", "Genius", "--percent", "40")
+    self.connect(SID, 1)
+    self.ok("rekey", "1", "11")
+    self.assertFalse(os.path.exists(os.path.join(self.config, "workspace1.json")))
+    self.assertIn("Genius", json.dumps(self.read_doc(11)))
+    self.assertEqual(list(self.links()["workspaces"]), ["11"])
+    self.assertEqual(self.read_marker("sessions", SID), "11")
+    self.assertEqual(self.ok("where", CLAUDE_CODE_SESSION_ID=SID).strip(), "11")
+
+  def test_rekey_swaps_what_the_target_held(self):
+    self.ok("--ws", "6", "text", "a", "--", "seis")
+    self.ok("--ws", "16", "text", "a", "--", "dieciseis")
+    self.connect(SID, 6)
+    self.connect(SID2, 16)
+    self.ok("rekey", "6", "16")
+    self.assertIn("seis", json.dumps(self.read_doc(16)))
+    self.assertNotIn("dieciseis", json.dumps(self.read_doc(16)))
+    self.assertIn("dieciseis", json.dumps(self.read_doc(6)))
+    self.assertEqual(self.links()["workspaces"]["16"]["session"], SID)
+    self.assertEqual(self.links()["workspaces"]["6"]["session"], SID2)
+    self.assertEqual(self.read_marker("sessions", SID), "16")
+    self.assertEqual(self.read_marker("sessions", SID2), "6")
+
+  def test_rekey_with_a_broken_links_file_moves_nothing(self):
+    self.ok("--ws", "5", "progress", "--label", "G", "--percent", "1")
+    with open(self.sessions_file(), "w") as f:
+      f.write("{oops")
+    self.fails(2, "rekey", "5", "15")
+    self.assertTrue(os.path.exists(os.path.join(self.config, "workspace5.json")))
+    self.assertFalse(os.path.exists(os.path.join(self.config, "workspace15.json")))
+
+  def test_rekey_leaves_no_temporary_files(self):
+    self.ok("--ws", "6", "text", "a", "--", "seis")
+    self.ok("--ws", "16", "text", "a", "--", "dieciseis")
+    self.ok("rekey", "6", "16")
+    self.assertEqual([n for n in os.listdir(self.config) if n.startswith(".rekey")], [])
+
+  def test_rekey_with_nothing_to_move_is_a_no_op(self):
+    self.ok("rekey", "2", "12")
+    self.assertFalse(os.path.exists(self.sessions_file()))
+
+  def test_rekey_is_refused_inside_a_session(self):
+    self.ok("--ws", "1", "progress", "--label", "G", "--percent", "1")
+    self.fails(1, "rekey", "1", "11", CLAUDE_CODE_SESSION_ID=SID)
+    self.assertTrue(os.path.exists(os.path.join(self.config, "workspace1.json")))
+
+  def test_rekey_rejects_bad_ids(self):
+    for bad in ("0", "991", "x", "../1"):
+      self.fails(2, "rekey", bad, "11")
 
 
 class TestGating(SessionsTestCase):

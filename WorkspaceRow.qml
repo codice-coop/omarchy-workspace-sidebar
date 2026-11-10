@@ -18,7 +18,7 @@ Item {
   property bool shown: true
 
   readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
-  readonly property bool focused: Hyprland.focusedWorkspace !== null && Hyprland.focusedWorkspace.id === ws
+  readonly property bool focused: sidebar.activeWs === ws
   readonly property bool editing: sidebar.editingWs === ws
   readonly property var file: sidebar.fileFor(ws)
   readonly property int pending: file ? SidebarModel.pendingCount(file.config, sidebar.dismissedFor(ws)) : 0
@@ -85,7 +85,7 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       width: numberMetrics.advanceWidth
       textFormat: Text.PlainText
-      text: String(root.ws)
+      text: String(SidebarModel.slotOf(root.ws))
       color: root.focused ? Commons.Color.accent : Commons.Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body

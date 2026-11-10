@@ -87,20 +87,26 @@ plugin requieren `omarchy restart shell` (el hot-reload no reemplaza instancias 
 
 ### Panel 1 — workspaces
 
-- Lista: misma regla que el widget `omarchy.workspaces` (siempre 1–5, más los existentes hasta 10).
+- Lista: misma regla que el widget `omarchy.workspaces` en el monitor donde vive la sidebar: cada monitor
+  tiene un bloque de diez ids de Hyprland (1–10, 11–20…, en `~/.local/state/omarchy/monitor-workspaces`). Se
+  listan los primeros 5 del bloque, los demás que existan y, al final, los visitantes de otro bloque. La fila
+  muestra el número dentro del monitor; títulos, archivos y sesiones usan el id.
 - Cada fila: número + título + **contador de avisos sin cerrar** de ese workspace (oculto si es 0).
 - Título por defecto `Workspace N`; **doble click** para editar inline, Enter guarda, Esc cancela. El
   layer-shell pide foco de teclado sólo mientras se edita. Persiste en `_sidebar.json`.
 - **Vacío** (sin ventanas): opacidad atenuada, como la barra.
-- **Foco**: el workspace `Hyprland.focusedWorkspace` resaltado (fondo con acento del tema), en cualquier
-  monitor.
+- **Foco**: resaltado el workspace que muestra el monitor de la sidebar (fondo con acento del tema), tenga o
+  no el foco ese monitor.
 - **Destello**: al cambiar el foco, la fila nueva hace un pulso breve (~600 ms) del color de acento,
   de opacidad 0 → ~0,35 → 0.
 - Click en una fila → enfoca ese workspace (mismo dispatch que la barra).
+- Si Hyprland renumera un workspace (`changeworkspaceid`: cambió de monitor o se desenchufó el suyo), el
+  título y los avisos cerrados lo siguen y `wsbar rekey` mueve su archivo y su sesión, intercambiando con lo
+  que hubiera en el número nuevo.
 
 ### Panel 2 — progreso del workspace con foco
 
-Muestra `workspaceN.json` del workspace con foco; cambia al cambiar el foco.
+Muestra `workspaceN.json` (N = id de Hyprland) del workspace que está mostrando el monitor de la sidebar.
 
 - **Franja de progreso general** (fija, fuera del scroll), pegada al borde izquierdo, a todo el alto del
   panel 2, ~6 px de ancho:
@@ -254,8 +260,9 @@ cuando espera una respuesta.
 
 Reglas:
 
-- Las sesiones están **desconectadas por defecto**. La persona conecta una sesión con
-  `/progreso conectar` (`wsbar connect`) y la desconecta con `/progreso desconectar` (`wsbar disconnect`);
+- Las sesiones están **desconectadas por defecto**. La persona conecta una sesión
+  escribiendo `/progreso` en ella (si el workspace lo tiene otra sesión, Claude pregunta antes) o con
+  `/progreso conectar` (`wsbar connect`), y la desconecta con `/progreso desconectar` (`wsbar disconnect`);
   `/progreso estado` es `wsbar status`. Claude nunca conecta por iniciativa propia.
 - **Una sesión por workspace**: conectar otra reemplaza a la anterior y lo informa
   ("reemplazó la sesión <prefijo>"). Una sesión está en un solo workspace: conectarla en otro la mueve
@@ -273,7 +280,7 @@ sólo `wsbar`, atómico y validado; la sidebar lo lee y nunca lo escribe:
                                     "host": "4026531836-12345-678901"}}}
 ```
 
-- Claves `"1"`..`"10"`; ids de sesión `^[A-Za-z0-9_-]{1,128}$` (otro valor se rechaza).
+- Claves: id de Hyprland, `"1"`..`"990"`; ids de sesión `^[A-Za-z0-9_-]{1,128}$` (otro valor se rechaza).
 - `project`: toplevel git del cwd al conectar (o `--project`), vacío si no hay.
 - `active`: `false` después de `SessionEnd`; el link se conserva para que una sesión retomada con el
   mismo id siga conectada (`SessionStart` lo vuelve a `true`).
@@ -366,7 +373,7 @@ plugin no cambia.
 ## Errores y casos borde
 
 - Monitor guardado ausente → monitor con foco. Monitor desconectado con la sidebar encima → mismo fallback.
-- Workspace > 10 o especial (scratchpad) → no se lista; el panel 2 muestra el estado vacío.
+- Workspace especial (scratchpad) → no se lista. Workspace de otro bloque en este monitor → se lista al final, como en la barra.
 - Escritura concurrente en el mismo workspace → `wsbar.lock` la serializa; además el `rename` atómico evita
   archivos corruptos. Con sesiones conectadas sólo una sesión escribe cada workspace.
 - `_sidebar.json` inválido → defaults en memoria y se reescribe en el próximo cambio.

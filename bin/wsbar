@@ -22,6 +22,10 @@ import tempfile
 import time
 
 VERSION = 1
+SLOTS = 10            # workspaces per monitor block
+MAX_WS = 990
+MONITOR_WS_RE = re.compile(r"([A-Za-z0-9_.-]+):(\d{1,2})")
+WS_KEY_RE = re.compile(r"[1-9]\d{0,2}")
 BLOCK_TYPES = ("notices", "focus", "milestones", "text", "progress")
 NOTICE_LEVELS = ("info", "warn", "error")
 MILESTONE_STATUSES = ("done", "current", "pending")
@@ -58,7 +62,8 @@ HELP_EPILOG = """\
 workspace target (first match wins):
   --ws N, WSBAR_WS=N, or autodetection: the ancestors of this process are
   matched against `hyprctl clients -j` to find the terminal's workspace.
-  Only workspaces 1..10 are valid.
+  Workspaces are Hyprland ids: each monitor owns a block of ten (1-10, 11-20...),
+  so --ws takes the id or MONITOR:N (--ws DP-1:6).
 
   A Claude Code session connected with `wsbar connect` targets its linked
   workspace instead (see "sessions" below).
@@ -111,14 +116,45 @@ def workspace_path(ws):
 
 # ---------- workspace detection ----------
 
-def parse_ws(value, source):
+def monitor_blocks():
+  """Connector -> block, from the file Omarchy keeps them in; {} if there is none."""
+  base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+  blocks = {}
   try:
-    ws = int(str(value).strip())
+    with open(os.path.join(base, "omarchy", "monitor-workspaces"), encoding="utf-8") as f:
+      for line in f:
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) >= 3 and fields[1] and fields[0].isdigit():
+          blocks[fields[1]] = int(fields[0])
+  except OSError:
+    pass
+  return blocks
+
+
+def parse_ws(value, source):
+  text = str(value).strip()
+  m = MONITOR_WS_RE.fullmatch(text)
+  if m:
+    block = monitor_blocks().get(m.group(1))
+    slot = int(m.group(2))
+    if block is None or not 1 <= slot <= SLOTS:
+      raise WsbarError("%s: '%s' is not a workspace of a connected monitor" % (source, value))
+    return block * SLOTS + slot
+  try:
+    ws = int(text)
   except ValueError:
-    raise WsbarError("%s: '%s' is not a workspace number (1..10)" % (source, value))
-  if not 1 <= ws <= 10:
-    raise WsbarError("%s: workspace %d is out of range (1..10)" % (source, ws))
+    raise WsbarError("%s: '%s' is not a workspace id or MONITOR:N" % (source, value))
+  if not 1 <= ws <= MAX_WS:
+    raise WsbarError("%s: workspace %d is out of range (1..%d)" % (source, ws, MAX_WS))
   return ws
+
+
+def ws_label(ws):
+  """Where the person sees a workspace: "6 en DP-1"; "" without per-monitor blocks."""
+  for connector, block in monitor_blocks().items():
+    if (ws - 1) // SLOTS == block:
+      return "%d en %s" % ((ws - 1) % SLOTS + 1, connector)
+  return ""
 
 
 def parent_pid(pid):
@@ -177,8 +213,8 @@ def detect_ws():
         raise WsbarError("process %d has windows on workspaces %s, cannot tell which one is this terminal; pass --ws N"
                          % (pid, ", ".join(str(w) for w in sorted(found))), EXIT_ENV)
       ws = next(iter(found))
-      if not 1 <= ws <= 10:
-        raise WsbarError("the terminal is on workspace %d, which the sidebar does not show (1..10); pass --ws N" % ws, EXIT_ENV)
+      if not 1 <= ws <= MAX_WS:
+        raise WsbarError("the terminal is on workspace %d, which the sidebar does not show; pass --ws N" % ws, EXIT_ENV)
       return ws
   raise WsbarError("could not detect the workspace (no ancestor process is a Hyprland window); pass --ws N", EXIT_ENV)
 
@@ -986,7 +1022,6 @@ def cmd_publish(args):
 # entry script skip Python for sessions that are not connected.
 
 SESSIONS_FILE = "_sessions.json"
-WS_KEYS = tuple(str(n) for n in range(1, 11))
 MAX_PROJECT = 4096
 WAITING_PREFIX = "claude-espera-"
 HANDOFF_TTL = 60          # seconds a /clear handoff stays valid
@@ -1029,8 +1064,8 @@ def validate_links(doc):
   seen = set()
   for k, v in wss.items():
     w = "workspaces.%s" % k
-    if k not in WS_KEYS:
-      errors.append("%s: key must be a workspace number 1..10" % w)
+    if not WS_KEY_RE.fullmatch(k) or int(k) > MAX_WS:
+      errors.append("%s: key must be a workspace id 1..%d" % (w, MAX_WS))
     if not isinstance(v, dict):
       errors.append("%s must be an object" % w)
       continue
@@ -1280,6 +1315,54 @@ def soft_link(args):
     args.linked_ws = ws
 
 
+def swap_paths(a, b):
+  """Swap two files, either of which may not exist."""
+  has_a, has_b = os.path.exists(a), os.path.exists(b)
+  if has_a and has_b:
+    # A unique name: an interrupted swap can strand a file, never overwrite one.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(b), prefix=".rekey-")
+    os.close(fd)
+    os.replace(b, tmp)
+    os.replace(a, b)
+    os.replace(tmp, a)
+  elif has_a:
+    os.replace(a, b)
+  elif has_b:
+    os.replace(b, a)
+
+
+def cmd_rekey(args):
+  """A workspace changed number in Hyprland (moved to another monitor, or its
+  monitor was unplugged): its file and session link follow it. Swaps with
+  whatever the new number held, so nothing is lost."""
+  if env_session():
+    raise WsbarError("rekey is run by the sidebar, not from a Claude Code session", EXIT_ENV)
+  old = parse_ws(args.old, "old")
+  new = parse_ws(args.new, "new")
+  if old == new:
+    return
+  # Read first: with a broken links file nothing moves, so nothing disagrees.
+  links = read_links()
+  try:
+    swap_paths(workspace_path(old), workspace_path(new))
+  except OSError as e:
+    raise WsbarError("could not move the workspace file: %s" % e, EXIT_ENV)
+  wss = links["workspaces"]
+  from_old, from_new = wss.pop(str(old), None), wss.pop(str(new), None)
+  if from_old is None and from_new is None:
+    return
+  if from_old is not None:
+    wss[str(new)] = from_old
+  if from_new is not None:
+    wss[str(old)] = from_new
+  links["workspaces"] = dict(sorted(wss.items(), key=lambda kv: int(kv[0])))
+  save_links(links)
+  if from_old is not None:
+    write_marker("sessions", from_old["session"], str(new))
+  if from_new is not None:
+    write_marker("sessions", from_new["session"], str(old))
+
+
 def connect_project(args):
   if getattr(args, "project", None) is not None:
     return project_root(args)
@@ -1330,7 +1413,8 @@ def cmd_connect(args):
       notes.append("aviso: no se pudo limpiar el aviso de la sesión anterior: %s" % e)
     remove_marker("sessions", replaced)
   write_marker("sessions", sid, str(ws))
-  print("conectado al workspace %d" % ws)
+  label = ws_label(ws)
+  print("conectado al workspace %d%s" % (ws, " (%s)" % label if label else ""))
   if moved:
     print("movida desde el workspace %d" % old_ws)
   if replaced:
@@ -1740,13 +1824,13 @@ class Parser(argparse.ArgumentParser):
 def build_parser():
   # Shared options are accepted before or after the subcommand.
   common = argparse.ArgumentParser(add_help=False)
-  common.add_argument("--ws", default=argparse.SUPPRESS, help="target workspace 1..10 (overrides WSBAR_WS and autodetection)")
+  common.add_argument("--ws", default=argparse.SUPPRESS, help="target workspace: Hyprland id or MONITOR:N (overrides WSBAR_WS and autodetection)")
   proj = argparse.ArgumentParser(add_help=False)
   proj.add_argument("--project", default=argparse.SUPPRESS, metavar="PATH", help="project directory (default: git toplevel of cwd)")
 
   p = Parser(prog="wsbar", description="Write the io.github.codice-coop.workspace-sidebar progress panel of a Hyprland workspace.",
              epilog=HELP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-  p.add_argument("--ws", help="target workspace 1..10 (overrides WSBAR_WS and autodetection)")
+  p.add_argument("--ws", help="target workspace: Hyprland id or MONITOR:N (overrides WSBAR_WS and autodetection)")
   sub = p.add_subparsers(dest="cmd", metavar="command", parser_class=Parser)
   sub.required = True
 
@@ -1848,6 +1932,9 @@ def build_parser():
   sp.add_argument("--session", metavar="ID")
   sp = add("status", cmd_status, "show this session's link and every workspace's session", parents=())
   sp.add_argument("--session", metavar="ID")
+  sp = add("rekey", cmd_rekey, "a workspace changed number: move its file and session link (run by the sidebar)", parents=())
+  sp.add_argument("old")
+  sp.add_argument("new")
   sp = add("hook", cmd_hook, "Claude Code hook: read the event JSON on stdin (always exits 0)", parents=())
   sp.add_argument("event", nargs="?", help=", ".join(HOOK_EVENTS))
   return p
@@ -1875,7 +1962,7 @@ def main(argv=None):
       with wsbar_lock(LOCK_TIMEOUT):
         gate(args)
         args.func(args)
-    elif args.func in (cmd_connect, cmd_disconnect, cmd_status):
+    elif args.func in (cmd_connect, cmd_disconnect, cmd_status, cmd_rekey):
       # status too: it marks sessions whose Claude Code process died as ended.
       with wsbar_lock(LOCK_TIMEOUT):
         args.func(args)
